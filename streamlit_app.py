@@ -626,7 +626,25 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     # === リアルタイム予測を後ろに移動 ===
     st.header("⚡ リアルタイム予測 (Real-time Focus)")
-    st.write(f"モデル精度 (AUC-ROC): **{auc_test:.3f}** / Log Loss: **{logloss_test:.3f}**")
+    
+    # --- 精度評価の自動判定ロジック ---
+    auc_eval = "算出不可"
+    if not np.isnan(auc_test):
+        if auc_test >= 0.8: auc_eval = "🟢 非常に良い"
+        elif auc_test >= 0.7: auc_eval = "🔵 良い (実用レベル)"
+        elif auc_test >= 0.6: auc_eval = "🟡 普通"
+        else: auc_eval = "🔴 改善が必要"
+
+    loss_eval = "算出不可"
+    if not np.isnan(logloss_test):
+        if logloss_test <= 0.4: loss_eval = "🟢 非常に良い"
+        elif logloss_test <= 0.6: loss_eval = "🟡 普通"
+        else: loss_eval = "🔴 改善が必要"
+
+    # 指標を並べて見やすく表示
+    col_m1, col_m2 = st.columns(2)
+    col_m1.info(f"**モデル精度 (AUC-ROC)**: {auc_test:.3f} 👉 **{auc_eval}**\n\n*1.0に近いほど状態の判別が正確にできていることを示します（0.7以上が実用の目安）。*")
+    col_m2.info(f"**予測の確信度 (Log Loss)**: {logloss_test:.3f} 👉 **{loss_eval}**\n\n*0.0に近いほどAIが「迷いなく」正解していることを示します（0.6以下が目安）。*")
     
     with st.expander("📊 テスト期間の予測確率推移を表示"):
         fig, ax = plt.subplots(figsize=(10, 4))
