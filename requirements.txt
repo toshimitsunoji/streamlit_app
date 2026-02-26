@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+matplotlib
+lightgbm
+scikit-learn
+google-generativeai
+shap
