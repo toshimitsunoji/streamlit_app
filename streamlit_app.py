@@ -26,13 +26,6 @@ def setup_japanese_font():
 
 setup_japanese_font()
 
-# japanize-matplotlib は併用OK（あってもなくても動く）
-try:
-    import japanize_matplotlib
-    japanize_matplotlib.japanize()
-except Exception as e:
-    st.warning(f"⚠️ 日本語フォント設定（japanize-matplotlib）で問題が発生: {e}")
-
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, roc_auc_score, log_loss

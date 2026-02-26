@@ -6,4 +6,3 @@ lightgbm
 scikit-learn
 google-generativeai
 shap
-japanize-matplotlib
