@@ -6,6 +6,33 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+
+from pathlib import Path
+import matplotlib as mpl
+import matplotlib.font_manager as fm
+
+def setup_japanese_font():
+    # リポジトリに同梱するフォント（推奨）
+    font_path = Path(__file__).parent / "assets" / "fonts" / "NotoSansCJKjp-Regular.otf"
+    if font_path.exists():
+        fm.fontManager.addfont(str(font_path))
+        prop = fm.FontProperties(fname=str(font_path))
+        mpl.rcParams["font.family"] = prop.get_name()
+    else:
+        # フォールバック（Cloudでは効かないことも多い）
+        mpl.rcParams["font.family"] = ["Noto Sans CJK JP", "IPAexGothic", "IPAGothic", "Yu Gothic", "MS Gothic"]
+
+    mpl.rcParams["axes.unicode_minus"] = False  # 「−」化け対策
+
+setup_japanese_font()
+
+# japanize-matplotlib は併用OK（あってもなくても動く）
+try:
+    import japanize_matplotlib
+    japanize_matplotlib.japanize()
+except Exception as e:
+    st.warning(f"⚠️ 日本語フォント設定（japanize-matplotlib）で問題が発生: {e}")
+
 import matplotlib.pyplot as plt
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, roc_auc_score, log_loss
