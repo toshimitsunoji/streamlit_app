@@ -55,14 +55,8 @@ interp_steps = max(1, int(interp_td / freq_td))
 
 # --- 予測ターゲットの選択機能を追加 ---
 TARGET_OPTIONS = {
-    'CVRR_SCORE_NEW': '集中スコア',
-    'RMSSD_SCORE_NEW': '疲労・回復スコア',
-    'LP_SCORE_NEW': 'リラックススコア',
-    'NEMUKE_SCORE_NEW': '低覚醒スコア(眠気)',
-    'TP': 'TP(自律神経トータルパワー)',
     '集中判定': '集中判定(1=集中)',
-    '疲労判定': '疲労判定(1=疲労)',
-    '強い疲労判定': '強い疲労判定(1=強い)'
+    '疲労判定': '疲労判定(1=疲労)'
 }
 st.sidebar.subheader("🎯 予測ターゲット")
 selected_target_name = st.sidebar.selectbox("予測する指標を選択", list(TARGET_OPTIONS.values()), index=0)
@@ -392,290 +386,243 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
     if '疲労判定' in df_insight.columns:
         df_insight['fatigue_start'] = (df_insight['疲労判定'] >= 0.5) & (df_insight['疲労判定'].shift(1) < 0.5)
 
-    tab1, tab2, tab3 = st.tabs(["📝 マイ・スペック", "📊 時間帯・曜日特性", "💡 行動・予定インサイト"])
+    # --- インサイトデータの算出 ---
+    def get_peak_time(metric_col):
+        if metric_col not in df_insight.columns:
+            return None, None
+        pivot_df = df_insight.pivot_table(
+            values=metric_col, 
+            index=df_insight.index.hour, 
+            columns=df_insight.index.dayofweek, 
+            aggfunc='mean'
+        )
+        start_hour_hm = time_range[0]
+        end_hour_hm = time_range[1]
+        
+        # 選択された時間帯・曜日のみ抽出
+        daytime_pivot = pivot_df.loc[start_hour_hm:end_hour_hm, selected_dow_indices]
+        if not daytime_pivot.isna().all().all():
+            best_hour, best_dow = daytime_pivot.stack().idxmax()
+            return int(best_hour), dow_options[int(best_dow)]
+        return None, None
+
+    f_hour, f_dow = get_peak_time('集中判定')
+    fat_hour, fat_dow = get_peak_time('疲労判定')
+
+    avg_focus_duration_str = "算出できません"
+    daily_focus_count_str = "算出できません"
+    focus_durations = pd.Series(dtype=float)
     
-    with tab1:
-        st.markdown(f"### 🎯 あなたの集中特性 (選択条件での集計)")
-        if '集中判定' in df_ts.columns:
-            # 継続時間をより正確に計算するため、元データを1分単位でリサンプリングして計算
-            df_1min = df_ts[['集中判定']].resample('1T').mean()
-            df_1min = df_1min.ffill(limit=5)
+    if '集中判定' in df_ts.columns:
+        # 継続時間をより正確に計算するため、元データを1分単位でリサンプリングして計算
+        df_1min = df_ts[['集中判定']].resample('1T').mean()
+        df_1min = df_1min.ffill(limit=5)
+        df_1min = df_1min[df_1min.index.dayofweek.isin(selected_dow_indices)]
+        df_1min = df_1min[(df_1min.index.hour >= time_range[0]) & (df_1min.index.hour <= time_range[1])]
+        
+        focus_mask = df_1min['集中判定'] >= 0.5
+        focus_blocks = focus_mask.groupby((focus_mask != focus_mask.shift()).cumsum())
+        focus_durations = focus_blocks.sum() 
+        focus_durations = focus_durations[focus_durations > 0]
+        
+        if not focus_durations.empty:
+            avg_focus_duration_str = f"{focus_durations.mean():.0f}"
+            total_focus_count = len(focus_durations)
+            num_days = df_1min.index.normalize().nunique()
+            daily_focus_count = total_focus_count / num_days if num_days > 0 else 0
+            daily_focus_count_str = f"{daily_focus_count:.1f}"
+
+    focus_actions = []
+    if '1分間歩数' in df_insight.columns and 'focus_start' in df_insight.columns:
+        walk_before_focus = df_insight['1分間歩数'].shift(1)[df_insight['focus_start']].dropna()
+        avg_walk_overall = df_insight['1分間歩数'].mean()
+        if not walk_before_focus.empty and avg_walk_overall > 0:
+            avg_walk_before = walk_before_focus.mean()
+            if avg_walk_before > avg_walk_overall * 1.2:
+                focus_actions.append("事前に体を動かすこと（少し歩くなど）")
+            elif avg_walk_before < avg_walk_overall * 0.8:
+                focus_actions.append("事前に静かな環境で落ち着いて過ごすこと")
+
+    if 'has_schedule' in df_insight.columns and '集中判定' in df_insight.columns:
+        sched_mask = df_insight['has_schedule'] >= 0.5
+        sched_blocks = (sched_mask != sched_mask.shift()).cumsum()
+        sched_df = df_insight[sched_mask]
+        
+        focus_scores_rested = []
+        focus_scores_rushed = []
+        for _, group in sched_df.groupby(sched_blocks):
+            if len(group) > 1 and 'time_since_prev_event_min' in group.columns:
+                rest_before = group['time_since_prev_event_min'].iloc[0]
+                avg_focus = group['集中判定'].mean()
+                if not np.isnan(rest_before):
+                    if rest_before >= 30:
+                        focus_scores_rested.append(avg_focus)
+                    else:
+                        focus_scores_rushed.append(avg_focus)
+        
+        if len(focus_scores_rested) > 0 and len(focus_scores_rushed) > 0:
+            diff_focus = (np.mean(focus_scores_rested) - np.mean(focus_scores_rushed)) * 100
+            if diff_focus > 0:
+                focus_actions.append("予定の前に30分以上の空き時間（休憩）をとること")
+            elif diff_focus < 0:
+                focus_actions.append("予定と予定の間を空けずに連続して活動すること")
+
+    focus_actions_str = "データ不足のため特定できません" if not focus_actions else "、".join(focus_actions)
+
+    fatigue_actions = []
+    if '疲労判定' in df_insight.columns and 'has_schedule' in df_insight.columns:
+        sched_mask = df_insight['has_schedule'] >= 0.5
+        sched_blocks = (sched_mask != sched_mask.shift()).cumsum()
+        sched_df = df_insight[sched_mask]
+        
+        fatigue_diffs = []
+        for _, group in sched_df.groupby(sched_blocks):
+            if len(group) > 1:
+                fatigue_start_val = group['疲労判定'].iloc[0]
+                fatigue_end_val = group['疲労判定'].iloc[-1]
+                duration_hours = len(group) * (freq_td.total_seconds() / 3600)
+                if duration_hours > 0:
+                    fatigue_diffs.append((fatigue_end_val - fatigue_start_val) / duration_hours)
+
+        if len(fatigue_diffs) > 0:
+            avg_fatigue_diff = np.mean(fatigue_diffs) * 100
+            if avg_fatigue_diff > 0:
+                fatigue_actions.append("1時間以上の予定をこなすこと")
+
+    if 'fatigue_start' in df_insight.columns and 'focus_start' in df_insight.columns:
+        recovery_consecutive = [] 
+        recovery_single = []      
+        fatigue_times = df_insight[df_insight['fatigue_start']].index
+        focus_times = df_insight[df_insight['focus_start']].index
+        for fat_time in fatigue_times:
+            future_focus = focus_times[focus_times > fat_time]
+            if len(future_focus) > 0:
+                first_focus = future_focus[0]
+                if first_focus.date() == fat_time.date():
+                    rec_time = (first_focus - fat_time).total_seconds() / 60
+                    if 'consecutive_schedules' in df_insight.columns:
+                        cons_sched = df_insight.loc[fat_time, 'consecutive_schedules']
+                        if cons_sched >= 2:
+                            recovery_consecutive.append(rec_time)
+                        else:
+                            recovery_single.append(rec_time)
+                            
+        if len(recovery_consecutive) > 0 and len(recovery_single) > 0:
+            delay = np.mean(recovery_consecutive) - np.mean(recovery_single)
+            if delay > 0:
+                fatigue_actions.append("予定を連続して入れること")
+
+    fatigue_actions_str = "データ不足のため特定できません" if not fatigue_actions else "、".join(fatigue_actions)
+
+    # --- UI 表示 ---
+    st.markdown("### 🎯 あなたの集中特性")
+    if f_dow and f_hour is not None:
+        st.write(f"- **{f_dow}曜日**の **{f_hour}時台** に最も集中しやすい傾向があります。")
+    else:
+        st.write("- 集中しやすい時間帯はデータ不足により特定できませんでした。")
+    st.write(f"- 平均集中持続時間は **{avg_focus_duration_str}** 分です。")
+    st.write(f"- 1日に **{daily_focus_count_str}** 回集中と緩和のリズムを繰り返しています。")
+    st.write(f"- 集中に入りやすい行動は **{focus_actions_str}** です。")
+
+    st.markdown("### 🔋 あなたの疲労特性")
+    if fat_dow and fat_hour is not None:
+        st.write(f"- **{fat_dow}曜日**の **{fat_hour}時台** に最も疲労しやすい傾向があります。")
+    else:
+        st.write("- 疲労しやすい時間帯はデータ不足により特定できませんでした。")
+    st.write(f"- 疲労しやすい行動は **{fatigue_actions_str}** です。")
+
+    # 分布グラフの表示
+    if not focus_durations.empty:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("#### 集中持続時間の分布")
+        fig_dist, ax_dist = plt.subplots(figsize=(8, 3))
+        max_duration = int(focus_durations.max())
+        max_bin = math.ceil(max_duration / 10) * 10
+        bins = np.arange(0, max_bin + 20, 10) 
+        
+        counts, edges, patches = ax_dist.hist(focus_durations, bins=bins, color='#4A90E2', edgecolor='white', alpha=0.8)
+        
+        bin_centers = edges[:-1] + 5
+        xtick_labels = [f"{int(edges[i])}-{int(edges[i+1])-1}" for i in range(len(edges)-1)]
+        
+        ax_dist.set_xticks(bin_centers)
+        ax_dist.set_xticklabels(xtick_labels, rotation=45, ha='right', fontsize=9)
+        
+        ax_dist.set_xlabel("集中持続時間 (分)")
+        ax_dist.set_ylabel("回数")
+        ax_dist.set_title("集中持続時間のヒストグラム (10分刻み)")
+        ax_dist.spines['top'].set_visible(False)
+        ax_dist.spines['right'].set_visible(False)
+        fig_dist.tight_layout()
+        st.pyplot(fig_dist)
+
+    # --- ヒートマップの表示 ---
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("### 📊 時間帯・曜日別の傾向 (ヒートマップ)")
+    
+    def plot_heatmap(target_metric, title_prefix, cmap_name):
+        if target_metric not in df_imp.columns:
+            return None
             
-            # フィルタリングの適用
-            selected_dow_indices = [dow_options.index(d) for d in selected_dows]
-            df_1min = df_1min[df_1min.index.dayofweek.isin(selected_dow_indices)]
-            df_1min = df_1min[(df_1min.index.hour >= time_range[0]) & (df_1min.index.hour <= time_range[1])]
+        pivot_df = df_imp.pivot_table(
+            values=target_metric, 
+            index=df_imp.index.hour, 
+            columns=df_imp.index.dayofweek, 
+            aggfunc='mean'
+        )
+        
+        start_hour_hm = time_range[0]
+        end_hour_hm = time_range[1]
+        num_hours_hm = end_hour_hm - start_hour_hm + 1
+        
+        fig_hm, ax_hm = plt.subplots(figsize=(6, 4))
+        heatmap_data = np.full((num_hours_hm, 7), np.nan)
+        
+        for h in pivot_df.index:
+            if start_hour_hm <= h <= end_hour_hm:
+                for d in pivot_df.columns:
+                    if d in selected_dow_indices:
+                        heatmap_data[int(h) - start_hour_hm, int(d)] = pivot_df.loc[h, d]
+        
+        im = ax_hm.imshow(heatmap_data, cmap=cmap_name, aspect='auto')
+        
+        ax_hm.set_xticks(np.arange(7))
+        ax_hm.set_xticklabels(dow_options)
+        
+        yticks = []
+        yticklabels = []
+        for i, h in enumerate(range(start_hour_hm, end_hour_hm + 1)):
+            yticks.append(i)
+            yticklabels.append(str(h))
             
-            focus_mask = df_1min['集中判定'] >= 0.5
-            focus_blocks = focus_mask.groupby((focus_mask != focus_mask.shift()).cumsum())
-            focus_durations = focus_blocks.sum() 
-            focus_durations = focus_durations[focus_durations > 0]
-            
-            if not focus_durations.empty:
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                col_m1.metric("平均集中持続時間", f"{focus_durations.mean():.0f} 分")
-                col_m2.metric("最長集中記録", f"{focus_durations.max():.0f} 分")
-                
-                # 総集中回数と1日あたりの平均集中回数
-                total_focus_count = len(focus_durations)
-                num_days = df_1min.index.normalize().nunique()
-                daily_focus_count = total_focus_count / num_days if num_days > 0 else 0
-                
-                col_m3.metric("総集中回数", f"{total_focus_count} 回", help="選択期間内で集中状態に入った合計回数")
-                col_m4.metric("1日あたりの平均集中回数", f"{daily_focus_count:.1f} 回/日")
-                
-                # 集中持続時間の分布グラフ (10分刻みに修正)
-                st.markdown("#### 集中持続時間の分布")
-                fig_dist, ax_dist = plt.subplots(figsize=(8, 4))
-                max_duration = int(focus_durations.max())
-                max_bin = math.ceil(max_duration / 10) * 10
-                bins = np.arange(0, max_bin + 20, 10) 
-                
-                # エッジでビンを切る
-                counts, edges, patches = ax_dist.hist(focus_durations, bins=bins, color='#4A90E2', edgecolor='white', alpha=0.8)
-                
-                # 表示用のラベル作成 (0-9, 10-19...)
-                bin_centers = edges[:-1] + 5
-                xtick_labels = [f"{int(edges[i])}-{int(edges[i+1])-1}" for i in range(len(edges)-1)]
-                
-                ax_dist.set_xticks(bin_centers)
-                ax_dist.set_xticklabels(xtick_labels, rotation=45, ha='right', fontsize=9)
-                
-                ax_dist.set_xlabel("集中持続時間 (分)")
-                ax_dist.set_ylabel("回数")
-                ax_dist.set_title("集中持続時間のヒストグラム (10分刻み)")
-                ax_dist.spines['top'].set_visible(False)
-                ax_dist.spines['right'].set_visible(False)
-                fig_dist.tight_layout()
-                st.pyplot(fig_dist)
-            else:
-                st.write("指定された条件で十分な集中データがありません。")
+        ax_hm.set_yticks(yticks)
+        ax_hm.set_yticklabels(yticklabels)
+        
+        ax_hm.set_xlabel("曜日")
+        ax_hm.set_ylabel("時間帯 (時)")
+        ax_hm.set_title(f"{title_prefix} ({start_hour_hm}時〜{end_hour_hm}時)")
+        
+        cbar = plt.colorbar(im, ax=ax_hm)
+        cbar.set_label("確率")
+        
+        return fig_hm
+
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        st.markdown("#### 🎯 集中しやすい時間帯")
+        fig_focus = plot_heatmap('集中判定', "曜日・時間帯別の集中確率", 'Blues')
+        if fig_focus:
+            st.pyplot(fig_focus)
         else:
-            st.write("データに「集中判定」列が含まれていないため計算できません。")
-                
-    with tab2:
-        st.markdown("### 📊 時間帯・曜日別の傾向 (集中・疲労)")
-        col_h1, col_h2 = st.columns(2)
-        
-        def plot_heatmap(target_metric, title_prefix, cmap_name):
-            if target_metric not in df_imp.columns:
-                return None, None, None
-                
-            pivot_df = df_imp.pivot_table(
-                values=target_metric, 
-                index=df_imp.index.hour, 
-                columns=df_imp.index.dayofweek, 
-                aggfunc='mean'
-            )
+            st.write("データ不足のため表示できません。")
             
-            start_hour_hm = time_range[0]
-            end_hour_hm = time_range[1]
-            num_hours_hm = end_hour_hm - start_hour_hm + 1
-            
-            fig_hm, ax_hm = plt.subplots(figsize=(6, 4))
-            heatmap_data = np.full((num_hours_hm, 7), np.nan)
-            
-            for h in pivot_df.index:
-                if start_hour_hm <= h <= end_hour_hm:
-                    for d in pivot_df.columns:
-                        if d in selected_dow_indices:
-                            heatmap_data[int(h) - start_hour_hm, int(d)] = pivot_df.loc[h, d]
-            
-            im = ax_hm.imshow(heatmap_data, cmap=cmap_name, aspect='auto')
-            
-            ax_hm.set_xticks(np.arange(7))
-            ax_hm.set_xticklabels(dow_options)
-            
-            yticks = []
-            yticklabels = []
-            for i, h in enumerate(range(start_hour_hm, end_hour_hm + 1)):
-                yticks.append(i)
-                yticklabels.append(str(h))
-                
-            ax_hm.set_yticks(yticks)
-            ax_hm.set_yticklabels(yticklabels)
-            
-            ax_hm.set_xlabel("曜日")
-            ax_hm.set_ylabel("時間帯 (時)")
-            ax_hm.set_title(f"{title_prefix} ({start_hour_hm}時〜{end_hour_hm}時)")
-            
-            cbar = plt.colorbar(im, ax=ax_hm)
-            cbar.set_label("確率")
-            
-            daytime_pivot = pivot_df.loc[start_hour_hm:end_hour_hm, selected_dow_indices]
-            best_hour, best_dow_jp = None, None
-            if not daytime_pivot.isna().all().all():
-                best_hour, best_dow = daytime_pivot.stack().idxmax()
-                best_hour = int(best_hour)
-                best_dow = int(best_dow)
-                best_dow_jp = dow_options[best_dow]
-                
-            return fig_hm, best_hour, best_dow_jp
-
-        with col_h1:
-            st.markdown("#### 🎯 集中しやすい時間帯")
-            fig_focus, f_hour, f_dow = plot_heatmap('集中判定', "曜日・時間帯別の集中確率", 'Blues')
-            if fig_focus:
-                st.pyplot(fig_focus)
-                if f_hour is not None:
-                    st.write(f"※ 選択された条件では、**{f_dow}曜日の{f_hour}時台** に最も集中しやすい傾向があります。")
-            else:
-                st.write("「集中判定」データが不足しています。")
-
-        with col_h2:
-            st.markdown("#### 🔋 疲労しやすい時間帯")
-            fig_fatigue, fat_hour, fat_dow = plot_heatmap('疲労判定', "曜日・時間帯別の疲労確率", 'Reds')
-            if fig_fatigue:
-                st.pyplot(fig_fatigue)
-                if fat_hour is not None:
-                    st.write(f"※ 選択された条件では、**{fat_dow}曜日の{fat_hour}時台** に最も疲労しやすい傾向があります。")
-            else:
-                st.write("「疲労判定」データが不足しています。")
-
-    with tab3:
-        st.markdown("### 📅 スケジュール・行動とパフォーマンスの関係")
-        insight_texts = []
-        
-        # 0. 新規: 疲労のピークタイム
-        if 'fatigue_start' in df_insight.columns:
-            fatigue_starts = df_insight[df_insight['fatigue_start']]
-            if not fatigue_starts.empty:
-                peak_fatigue_hour = fatigue_starts.index.hour.value_counts().idxmax()
-                insight_texts.append(f"- 🔋 **疲労のピークタイム**: あなたの疲労が最も始まりやすいのは **{peak_fatigue_hour}時台** です。この時間帯の前に小休憩を入れることをお勧めします。")
-        
-        # 1. 1時間の予定での疲労変化 / 次の予定の集中力
-        if '疲労判定' in df_insight.columns and 'has_schedule' in df_insight.columns:
-            sched_mask = df_insight['has_schedule'] >= 0.5
-            sched_blocks = (sched_mask != sched_mask.shift()).cumsum()
-            sched_df = df_insight[sched_mask]
-            
-            fatigue_diffs = []
-            focus_scores_rested = []
-            focus_scores_rushed = []
-            
-            for _, group in sched_df.groupby(sched_blocks):
-                if len(group) > 1:
-                    fatigue_start_val = group['疲労判定'].iloc[0]
-                    fatigue_end_val = group['疲労判定'].iloc[-1]
-                    duration_hours = len(group) * (freq_td.total_seconds() / 3600)
-                    if duration_hours > 0:
-                        fatigue_diffs.append((fatigue_end_val - fatigue_start_val) / duration_hours)
-                    
-                    if 'time_since_prev_event_min' in group.columns and '集中判定' in df_insight.columns:
-                        rest_before = group['time_since_prev_event_min'].iloc[0]
-                        avg_focus = group['集中判定'].mean()
-                        if not np.isnan(rest_before):
-                            if rest_before >= 30:
-                                focus_scores_rested.append(avg_focus)
-                            else:
-                                focus_scores_rushed.append(avg_focus)
-            
-            if len(fatigue_diffs) > 0:
-                avg_fatigue_diff = np.mean(fatigue_diffs) * 100
-                if avg_fatigue_diff > 0:
-                    insight_texts.append(f"- 🕒 **予定中の疲労蓄積**: 1時間の予定をこなすと、疲労の発生割合が平均して **{abs(avg_fatigue_diff):.1f} ポイント増加** します。")
-                elif avg_fatigue_diff < 0:
-                    insight_texts.append(f"- 🕒 **予定中のリフレッシュ**: 1時間の予定をこなすと、疲労の発生割合が平均して **{abs(avg_fatigue_diff):.1f} ポイント低下** します。予定がリフレッシュになっている可能性があります。")
-            
-            if len(focus_scores_rested) > 0 and len(focus_scores_rushed) > 0:
-                diff_focus = (np.mean(focus_scores_rested) - np.mean(focus_scores_rushed)) * 100
-                if diff_focus > 0:
-                    insight_texts.append(f"- ☕ **事前の休憩効果**: 予定の前に30分以上の空き時間（休憩）があると、次の予定中の集中発生割合が **平均 {abs(diff_focus):.1f} ポイント高まります**。")
-                elif diff_focus < 0:
-                    insight_texts.append(f"- 🏃 **連続稼働の強さ**: 予定の前に空き時間がない（連続している）方が、次の予定中の集中発生割合が **平均 {abs(diff_focus):.1f} ポイント高まります**。勢いに乗ると集中できるタイプです。")
-                    
-        # 2. 予定の連続と回復時間 / 3. 予定後の休憩と回復時間
-        if 'fatigue_start' in df_insight.columns and 'focus_start' in df_insight.columns:
-            recovery_consecutive = [] 
-            recovery_single = []      
-            recovery_with_rest = []   
-            recovery_no_rest = []     
-            
-            fatigue_times = df_insight[df_insight['fatigue_start']].index
-            focus_times = df_insight[df_insight['focus_start']].index
-            
-            for fat_time in fatigue_times:
-                future_focus = focus_times[focus_times > fat_time]
-                if len(future_focus) > 0:
-                    first_focus = future_focus[0]
-                    if first_focus.date() == fat_time.date():
-                        rec_time = (first_focus - fat_time).total_seconds() / 60
-                        
-                        if 'consecutive_schedules' in df_insight.columns:
-                            cons_sched = df_insight.loc[fat_time, 'consecutive_schedules']
-                            if cons_sched >= 2:
-                                recovery_consecutive.append(rec_time)
-                            else:
-                                recovery_single.append(rec_time)
-                                
-                        if 'time_to_next_event_min' in df_insight.columns:
-                            t2next = df_insight.loc[fat_time, 'time_to_next_event_min']
-                            if not np.isnan(t2next) and t2next >= 30:
-                                recovery_with_rest.append(rec_time)
-                            else:
-                                recovery_no_rest.append(rec_time)
-            
-            if len(recovery_consecutive) > 0 and len(recovery_single) > 0:
-                delay = np.mean(recovery_consecutive) - np.mean(recovery_single)
-                if delay > 0:
-                    insight_texts.append(f"- 📅 **連続予定の負荷**: 予定が連続している状態での疲労は、単発の予定の疲労に比べて回復が **平均 {abs(delay):.0f} 分遅れます**。")
-                elif delay < 0:
-                    insight_texts.append(f"- 📅 **連続予定の耐性**: 予定が連続している状態での疲労は、単発の予定に比べて回復が **平均 {abs(delay):.0f} 分早まります**。")
-                    
-            if len(recovery_with_rest) > 0 and len(recovery_no_rest) > 0:
-                speedup = np.mean(recovery_no_rest) - np.mean(recovery_with_rest)
-                if speedup > 0:
-                    insight_texts.append(f"- 🛋️ **事後の休憩効果**: 疲労状態になった後、次の予定まで30分以上の空き（休憩）があると、回復が **平均 {abs(speedup):.0f} 分早まります**。")
-                elif speedup < 0:
-                    insight_texts.append(f"- 🛋️ **短い間隔での回復**: 疲労状態になった後、次の予定まで30分以内の短い間隔の方が、回復が **平均 {abs(speedup):.0f} 分早まります**。")
-
-        # 4. 行動特性 (どういった時に集中に入りやすいか)
-        if '1分間歩数' in df_insight.columns and 'focus_start' in df_insight.columns:
-            walk_before_focus = df_insight['1分間歩数'].shift(1)[df_insight['focus_start']].dropna()
-            avg_walk_overall = df_insight['1分間歩数'].mean()
-            
-            if not walk_before_focus.empty and avg_walk_overall > 0:
-                avg_walk_before = walk_before_focus.mean()
-                if avg_walk_before > avg_walk_overall * 1.2:
-                    insight_texts.append(f"- 🚶 **集中に入りやすい行動**: 集中が始まる直前は、普段より歩数（活動量）が約 {(avg_walk_before/avg_walk_overall):.1f}倍 多い傾向があります。少し歩くなど体を動かした後に集中モードに入りやすいタイプです。")
-                elif avg_walk_before < avg_walk_overall * 0.8:
-                    insight_texts.append(f"- 🧘 **集中に入りやすい行動**: 集中が始まる直前は、普段より歩数（活動量）が少ない傾向があります。静かな環境で落ち着いてから集中モードに入りやすいタイプです。")
-
-        # 5. 新規: 疲労と回復パターンの追加分析 (アクティブレスト効果)
-        if '1分間歩数' in df_insight.columns and 'fatigue_start' in df_insight.columns and 'focus_start' in df_insight.columns:
-            active_recovery_times = []
-            passive_recovery_times = []
-            
-            fatigue_times = df_insight[df_insight['fatigue_start']].index
-            focus_times = df_insight[df_insight['focus_start']].index
-            avg_walk_overall = df_insight['1分間歩数'].mean()
-            
-            for fat_time in fatigue_times:
-                future_focus = focus_times[focus_times > fat_time]
-                if len(future_focus) > 0:
-                    first_focus = future_focus[0]
-                    if first_focus.date() == fat_time.date():
-                        rec_time = (first_focus - fat_time).total_seconds() / 60
-                        
-                        period_walk = df_insight.loc[fat_time:first_focus, '1分間歩数'].mean()
-                        if pd.notna(period_walk):
-                            if period_walk > avg_walk_overall:
-                                active_recovery_times.append(rec_time)
-                            else:
-                                passive_recovery_times.append(rec_time)
-                                
-            if len(active_recovery_times) > 0 and len(passive_recovery_times) > 0:
-                diff_rest = np.mean(passive_recovery_times) - np.mean(active_recovery_times)
-                if diff_rest > 10: 
-                    insight_texts.append(f"- 🏃 **アクティブレスト効果**: 疲労時に軽く体を動かす（歩数が平均より多い）と、じっとしている時より **平均 {abs(diff_rest):.0f} 分早く回復** します。")
-                elif diff_rest < -10:
-                    insight_texts.append(f"- 🛌 **パッシブレスト効果**: 疲労時に体を休める（歩数が平均より少ない）と、動いている時より **平均 {abs(diff_rest):.0f} 分早く回復** します。")
-
-        if insight_texts:
-            for text in insight_texts:
-                st.write(text)
+    with col_h2:
+        st.markdown("#### 🔋 疲労しやすい時間帯")
+        fig_fatigue = plot_heatmap('疲労判定', "曜日・時間帯別の疲労確率", 'Reds')
+        if fig_fatigue:
+            st.pyplot(fig_fatigue)
         else:
-            st.write("予定データや疲労・集中データが不足しているため、十分なインサイトを算出できません。")
+            st.write("データ不足のため表示できません。")
 
     # === リアルタイム予測を後ろに移動 ===
     st.header("⚡ リアルタイム予測 (Real-time Focus)")
