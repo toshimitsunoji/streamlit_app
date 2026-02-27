@@ -20,15 +20,6 @@ import plotly.express as px
 # --- Streamlit ページ設定 ---
 st.set_page_config(page_title="集中・疲労予測システム", layout="wide")
 
-# 日本語フォントの設定
-try:
-    import japanize_matplotlib
-    japanize_matplotlib.japanize()
-except ImportError:
-    st.warning("⚠️ japanize-matplotlib ライブラリが読み込めません。グラフの日本語が文字化けする可能性があります。GitHub上で `requirements.txt` が `streamlit_app.py` と全く同じフォルダ（第一階層）に保存されているか確認してください。")
-
-warnings.filterwarnings('ignore')
-
 st.title("🧠 ウェアラブル×スケジュール 集中予測システム")
 st.markdown("""
 ウェアラブルデバイスのデータと予定表データを組み合わせて、数時間後の集中スコアを予測し、推奨する働き方を提案します。
