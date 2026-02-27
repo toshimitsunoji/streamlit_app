@@ -518,8 +518,13 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 # グラフ: 日×時間のヒートマップ
                 st.markdown("#### 日付×時間帯の集中判定回数 (赤枠は予定あり)")
                 hm_pivot = df_m_hourly.pivot_table(index='day', columns='hour', values='集中判定_フラグ', aggfunc='sum').fillna(0)
+                
                 # 欠けている日・時間を補完し、対象時間帯のみに絞り込む
-                all_days = list(range(1, df_month.index.days_in_month[0] + 1))
+                if len(df_month.index) > 0:
+                    days_in_month = df_month.index[0].days_in_month
+                else:
+                    days_in_month = 31 # fallback
+                all_days = list(range(1, days_in_month + 1))
                 hm_pivot = hm_pivot.reindex(index=all_days, columns=target_hours, fill_value=0)
                 
                 fig_hm_month = go.Figure(data=go.Heatmap(
@@ -528,4 +533,324 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     y=[f"{d}日" for d in all_days],
                     colorscale='Blues',
                     hovertemplate="日付: %{y}<br>時間帯: %{x}<br>集中回数: %{z}<extra></extra>"
-      
+                ))
+                
+                # 予定がある時間帯に赤枠（Shapes）を追加
+                shapes = []
+                if df_sched is not None and not df_sched.empty:
+                    for d in all_days:
+                        for h in target_hours:
+                            try:
+                                dt_start = pd.to_datetime(f"{selected_month}-{d:02d} {h:02d}:00:00")
+                                dt_end = dt_start + pd.Timedelta('1H')
+                                has_sched = ((df_sched['start_dt'] < dt_end) & (df_sched['end_dt'] > dt_start)).any()
+                                if has_sched:
+                                    # 横軸が絞り込まれたため、インデックスを計算し直す
+                                    x_idx = h - time_range[0]
+                                    shapes.append(dict(
+                                        type="rect",
+                                        x0=x_idx - 0.5, x1=x_idx + 0.5,
+                                        y0=d - 1 - 0.5, y1=d - 1 + 0.5, # y0,y1 はインデックス(0始まり)で指定
+                                        line=dict(color="red", width=2),
+                                        fillcolor="rgba(0,0,0,0)"
+                                    ))
+                            except ValueError:
+                                pass # 存在しない日付（うるう年など）はスキップ
+                
+                fig_hm_month.update_layout(
+                    shapes=shapes,
+                    yaxis_autorange='reversed',
+                    height=600,
+                    margin=dict(l=20, r=20, t=20, b=20)
+                )
+                st.plotly_chart(fig_hm_month, use_container_width=True)
+                
+                # コメントの生成
+                best_dow_m = dow_options[dow_sum.idxmax()] if dow_sum.sum() > 0 else "不明"
+                best_hour_m = hour_sum.idxmax() if hour_sum.sum() > 0 else "不明"
+                
+                st.info(f"**【{selected_month} のマンスリーインサイト】**\n\n"
+                        f"- この月は **{best_dow_m}曜日** の集中判定回数が最も多くなっています。\n"
+                        f"- 時間帯で見ると **{best_hour_m}時台** に集中する傾向が強かったです。\n"
+                        f"- ヒートマップ上の赤枠は「予定（会議など）」が入っている時間帯を示しています。予定と集中の相関関係を視覚的に確認できます。")
+            else:
+                st.write("「集中判定」データが不足しているため表示できません。")
+
+    with tab3:
+        df_ts['date_str'] = df_ts.index.date.astype(str)
+        available_days = sorted(df_ts['date_str'].unique().tolist(), reverse=True)
+        
+        if not available_days:
+            st.write("分析可能な日のデータがありません。")
+        else:
+            selected_day = st.selectbox("分析対象とする年月日を選択してください", available_days)
+            df_day = df_ts[df_ts['date_str'] == selected_day].copy()
+            
+            # 設定された時間帯（time_range）でデータをフィルタリング
+            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+            
+            if 'CVRR_SCORE_NEW' in df_day.columns and not df_day.empty:
+                st.markdown("#### モメンタルグラフ (集中の波)")
+                
+                base_val = 50.0 # 基準となる平均値
+                
+                fig_daily = go.Figure()
+                
+                # 基準線(50)を描画（ホバーはスキップ）
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=[base_val]*len(df_day),
+                    mode='lines', line=dict(color='gray', width=1, dash='dash'),
+                    name='基準(50)', hoverinfo='skip'
+                ))
+                
+                # 上側（集中）の青い面
+                y_upper = np.where(df_day['CVRR_SCORE_NEW'] >= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=y_upper,
+                    fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', # 青系
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # 下側の面を描くために、ベースラインをもう一度引く
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=[base_val]*len(df_day),
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # 下側（緩和）のオレンジ系の面
+                y_lower = np.where(df_day['CVRR_SCORE_NEW'] <= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=y_lower,
+                    fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', # オレンジ系
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # ホバー・表示用の実際の推移線（黒色）
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, 
+                    y=df_day['CVRR_SCORE_NEW'],
+                    mode='lines',
+                    line=dict(color='#333333', width=2),
+                    name='CVRR SCORE',
+                    hovertemplate="時刻: %{x|%H:%M}<br>スコア: %{y:.1f}<extra></extra>"
+                ))
+                
+                fig_daily.update_layout(
+                    title=f"{selected_day} の集中と緩和の推移 ({time_range[0]}時〜{time_range[1]}時)",
+                    xaxis_title="時刻",
+                    yaxis_title="CVRR SCORE (集中度合い)",
+                    height=400,
+                    hovermode="x unified",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
+                fig_daily.update_xaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
+                fig_daily.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
+                st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # コメントの生成
+                if not df_day['CVRR_SCORE_NEW'].isna().all():
+                    max_idx = df_day['CVRR_SCORE_NEW'].idxmax()
+                    max_val = df_day['CVRR_SCORE_NEW'].max()
+                    avg_val = df_day['CVRR_SCORE_NEW'].mean()
+                    
+                    st.info(f"**【{selected_day} のデイリーインサイト】**\n\n"
+                            f"- この日の設定時間帯（{time_range[0]}時〜{time_range[1]}時）における集中（CVRR SCORE）のピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
+                            f"- 平均スコアは **{avg_val:.1f}** となっています。\n"
+                            f"- グラフにおいて基準値(50)より上側の**青い面**が「集中」している状態、下側の**オレンジの面**が「緩和（リラックス）」している状態を示しています。")
+                else:
+                    st.write("この日の有効なスコアデータがありません。")
+            else:
+                st.write("対象時間帯のデータがない、または「CVRR_SCORE_NEW」が含まれていないため、モメンタルグラフを表示できません。")
+
+
+    # =========================================================================
+    # リアルタイム予測 (Real-time Focus)
+    # =========================================================================
+    st.header("⚡ リアルタイム予測 (Real-time Focus)")
+    
+    auc_eval = "算出不可"
+    if not np.isnan(auc_test):
+        if auc_test >= 0.8: auc_eval = "🟢 非常に良い"
+        elif auc_test >= 0.7: auc_eval = "🔵 良い (実用レベル)"
+        elif auc_test >= 0.6: auc_eval = "🟡 普通"
+        else: auc_eval = "🔴 改善が必要"
+
+    loss_eval = "算出不可"
+    if not np.isnan(logloss_test):
+        if logloss_test <= 0.4: loss_eval = "🟢 非常に良い"
+        elif logloss_test <= 0.6: loss_eval = "🟡 普通"
+        else: loss_eval = "🔴 改善が必要"
+
+    col_m1, col_m2 = st.columns(2)
+    col_m1.info(f"**モデル精度 (AUC-ROC)**: {auc_test:.3f} 👉 **{auc_eval}**\n\n*1.0に近いほど状態の判別が正確にできていることを示します（0.7以上が実用の目安）。*")
+    col_m2.info(f"**予測の確信度 (Log Loss)**: {logloss_test:.3f} 👉 **{loss_eval}**\n\n*0.0に近いほどAIが「迷いなく」正解していることを示します（0.6以下が目安）。*")
+    
+    with st.expander("📊 テスト期間の予測確率推移を表示"):
+        fig_ts_plot = go.Figure()
+        fig_ts_plot.add_trace(go.Scatter(
+            x=test_df.index, y=y_test_class, mode='markers', name='実際の状態 (1=Yes, 0=No)',
+            marker=dict(color='blue', opacity=0.6, size=6), hovertemplate="日時: %{x}<br>状態: %{y}<extra></extra>"
+        ))
+        fig_ts_plot.add_trace(go.Scatter(
+            x=test_df.index, y=preds_proba, mode='lines', name='LightGBM 予測確率',
+            line=dict(color='red', width=2), opacity=0.8, hovertemplate="日時: %{x}<br>予測確率: %{y:.2f}<extra></extra>"
+        ))
+        fig_ts_plot.update_layout(title=f"テスト期間の {selected_target_name} 予測確率の推移", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_ts_plot, use_container_width=True)
+
+    st.subheader("🔮 リアルタイム予測と要因分析")
+    available_data_all = df_imp.drop(columns=drop_cols, errors='ignore')
+    if TARGET_DATETIME is not None:
+        try:
+            target_dt = pd.to_datetime(TARGET_DATETIME)
+            available_data = available_data_all[available_data_all.index <= target_dt]
+            if len(available_data) == 0:
+                st.warning("指定された基準日時以前のデータが存在しません。最新のデータを使用します。")
+                available_data = available_data_all
+        except Exception as e:
+            st.warning(f"日時のパースに失敗しました（{e}）。最新のデータを使用します。")
+    else:
+        available_data = available_data_all
+
+    target_data = available_data.iloc[-1:]
+    current_time = target_data.index[0]
+    current_val = float(target_data[target_col].values[0])
+    current_state_bool = current_val >= target_threshold
+    current_proba = model.predict_proba(target_data)[0, 1]
+    predicted_state_bool = current_proba >= 0.5
+    
+    col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+    col_p1.metric("基準日時", current_time.strftime('%Y-%m-%d %H:%M'))
+    col_p2.metric(f"現在の {selected_target_name} 状態", "Yes" if current_state_bool else "No")
+    col_p3.metric(f"{PREDICT_AHEAD}後の予測判定", "Yes" if predicted_state_bool else "No")
+    col_p4.metric(f"発生確率", f"{current_proba * 100:.1f} %")
+    st.caption(f"※ **予測判定と発生確率について**: {PREDICT_AHEAD}後にあなたが「{selected_target_name}」の状態になっている確率をAIが算出したものです。50%以上を「Yes」と判定しています。")
+
+    with st.spinner("SHAPで要因を分析しています..."):
+        explainer = shap.TreeExplainer(model)
+        shap_values_latest = explainer(target_data)
+        if len(shap_values_latest.shape) == 3:
+            shap_vals = shap_values_latest[0, :, 1].values
+            shap_base_obj = shap_values_latest[0, :, 1]
+        else:
+            shap_vals = shap_values_latest[0].values
+            shap_base_obj = shap_values_latest[0]
+        
+        def is_actionable(col: str) -> bool: return not (target_col in col or col in ["hour", "dayofweek"])
+        exp_df = pd.DataFrame({'Feature': target_data.columns, 'Value': target_data.values[0], 'SHAP': shap_vals})
+        exp_df['AbsSHAP'] = exp_df['SHAP'].abs()
+        exp_df_action = exp_df[exp_df['Feature'].apply(is_actionable)].sort_values('AbsSHAP', ascending=False)
+        
+        fig2, ax2 = plt.subplots(figsize=(8, 4))
+        shap.plots.waterfall(shap_base_obj, show=False)
+        st.pyplot(fig2)
+
+        st.markdown("**【要因分析の解説】**")
+        st.caption("※ 上記のSHAPグラフは専用ライブラリのため静止画像で出力しています。一番長いバー（赤または青）が確率に最も影響を与えた要因です。")
+        
+        pos_factors = exp_df_action[exp_df_action['SHAP'] > 0]
+        neg_factors = exp_df_action[exp_df_action['SHAP'] < 0]
+        
+        if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定']:
+            pos_effect_text, neg_effect_text = "確率上昇（悪化方向）", "確率低下（好転方向）"
+            bar_desc = f"※グラフの赤いバーが{selected_target_name}の発生確率を押し上げる（悪化）要因、青いバーが押し下げる（好転）要因を示しています。"
+        else:
+            pos_effect_text, neg_effect_text = "確率上昇（好転方向）", "確率低下（悪化方向）"
+            bar_desc = f"※グラフの赤いバーが{selected_target_name}の発生確率を押し上げる（好転）要因、青いバーが押し下げる（悪化）要因を示しています。"
+
+        base_pos = None
+        if not pos_factors.empty:
+            top_pos = pos_factors.iloc[0]
+            desc_pos = get_factor_direction_text(top_pos['Feature'], top_pos['Value'], available_data_all)
+            base_pos = get_base_feature_name(top_pos['Feature'])
+            st.write(f"- 📈 **確率を上げる要因**: **{desc_pos}** が{pos_effect_text}に働いています (影響度: {top_pos['SHAP']:+.2f})。")
+            
+        if not neg_factors.empty:
+            top_neg = neg_factors.iloc[0]
+            if base_pos is not None and get_base_feature_name(top_neg['Feature']) == base_pos and len(neg_factors) > 1:
+                top_neg = neg_factors.iloc[1]
+            desc_neg = get_factor_direction_text(top_neg['Feature'], top_neg['Value'], available_data_all)
+            st.write(f"- 📉 **確率を下げる要因**: **{desc_neg}** が{neg_effect_text}に働いています (影響度: {top_neg['SHAP']:+.2f})。")
+            
+        st.caption(bar_desc)
+
+    schedule_density = float(target_data["schedule_density_2h"].values[0]) if "schedule_density_2h" in target_data.columns else 0
+    time_to_next = float(target_data["time_to_next_event_min"].values[0]) if "time_to_next_event_min" in target_data.columns else np.nan
+    is_meeting = float(target_data["is_meeting"].values[0]) if "is_meeting" in target_data.columns else 0
+    
+    state_trend_prob = 1.0 - current_proba if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定'] else current_proba
+
+    reasons = []
+    if is_meeting > 0: reasons.append("現在会議中")
+    if schedule_density >= 0.6: reasons.append("予定密度が高い")
+    if state_trend_prob >= 0.6: reasons.append(f"{selected_target_name}の好ましい確率が高い")
+    elif state_trend_prob <= 0.4: reasons.append(f"{selected_target_name}の好ましくない確率が高い")
+    
+    if is_meeting > 0:
+        work_mode, advice = "E: 段取り（会議モード）", "論点を1枚に整理し、次アクションをToDo化しましょう。"
+    elif state_trend_prob >= 0.6 and (np.isnan(time_to_next) or time_to_next >= 50) and schedule_density < 0.6:
+        work_mode, advice = "C: アウトプット（深）- 企画・戦略", "状態が好転する確率が高く、まとまった時間もあります。設計・企画の骨格づくりなど、重い思考タスクを進めるのが最適です。"
+    elif state_trend_prob <= 0.4 or schedule_density >= 0.6:
+        work_mode, advice = "D: アウトプット（軽）- 整理・レビュー", "予定が細切れか、状態が悪化する確率が高いです。10〜20分で終わるToDo消化や、資料の整形・チェック作業に時間を当てましょう。"
+    else:
+        if (np.isnan(time_to_next) or time_to_next >= 30) and schedule_density < 0.6:
+            work_mode, advice = "A: インプット（重） または B: インプット（軽）", "難しめ資料の読み込みや情報整理など、次の深い思考に向けたインプット作業に適しています。"
+        else:
+            work_mode, advice = "E: 段取り", "次の深い作業へスムーズに入れるよう、論点の列挙や優先順位付け、素材の洗い出しを行いましょう。"
+
+    st.subheader("📝 分析レポート (AIによる提案)")
+    main_factor_desc = get_factor_direction_text(exp_df_action.iloc[0]['Feature'], exp_df_action.iloc[0]['Value'], available_data_all) if not exp_df_action.empty else "不明"
+    prompt_context = f"現在時刻: {current_time.strftime('%Y-%m-%d %H:%M')}\n現在の{selected_target_name}の状態: {'Yes' if current_state_bool else 'No'}\n{PREDICT_AHEAD}後の予測判定: {'Yes' if predicted_state_bool else 'No'} (発生確率: {current_proba * 100:.1f}%)\n直近の主要因: {main_factor_desc} (SHAP: {exp_df_action.iloc[0]['SHAP']:+.2f})\n判定された働き方: {work_mode}\n理由: {', '.join(reasons) if reasons else '特になし'}"
+    
+    if use_gemini and api_key:
+        with st.spinner("Geminiがレポートを作成中..."):
+            try:
+                genai.configure(api_key=api_key)
+                model_llm = genai.GenerativeModel('gemini-2.5-flash')
+                resp = model_llm.generate_content(f"以下のデータに基づき、客観的な働き方アドバイスレポートを生成してください。\n\n{prompt_context}\n\n構成:\n1. 予測結果と主な要因\n2. 奨励する働き方の具体例")
+                st.write(resp.text)
+            except Exception as e:
+                st.error(f"Gemini APIエラー: {e}")
+    else:
+        st.info("💡 Gemini APIキーが未入力のため、ルールベースの詳細レポートを表示します。")
+        st.markdown(f"#### 1. 近い将来（{PREDICT_AHEAD}後）の予測結果")
+        st.write(f"基準日時（{current_time.strftime('%Y-%m-%d %H:%M')}）の {selected_target_name} は **{'Yes' if current_state_bool else 'No'}** の状態です。")
+        st.write(f"{PREDICT_AHEAD}後は **{'Yes' if predicted_state_bool else 'No'}** （発生確率 **{current_proba * 100:.1f} %**）と予測されます。\nこの予測の主な要因として、**{main_factor_desc}** が影響しています。")
+        st.markdown(f"#### 2. 奨励する働き方")
+        st.write(f"現在の予測確率と予定状況（{', '.join(reasons) if reasons else '阻害要因なし'}）から、**「{work_mode}」**に取り組むことをお勧めします。\n**💡 進め方のアドバイス**: {advice}")
+
+# --- UI レイアウト ---
+st.write("### データのアップロード")
+col_file1, col_file2 = st.columns(2)
+with col_file1:
+    file_ts = st.file_uploader("1. 生体データ (CSV形式)", type=['csv'])
+with col_file2:
+    file_sched = st.file_uploader("2. 予定表データ (予定表.CSV) ※任意", type=['csv'])
+
+if st.button("🚀 分析を実行する", type="primary"):
+    if file_ts is not None:
+        # 分析実行フラグをセッションに保存（画面再描画で消えないようにする）
+        st.session_state['run_analysis'] = True
+    else:
+        st.warning("⚠️ 生体データ (CSV形式) をアップロードしてください。")
+
+# セッションにフラグがある場合のみ分析を実行・表示し続ける
+if st.session_state.get('run_analysis', False) and file_ts is not None:
+    try:
+        # ドロップダウン変更時の再読み込みエラーを防ぐためにポインタを先頭に戻す
+        file_ts.seek(0)
+        df_ts = pd.read_csv(file_ts, skiprows=2)
+        
+        df_sched = None
+        if file_sched is not None:
+            file_sched.seek(0)
+            df_sched = pd.read_csv(file_sched)
+            
+        run_analysis(df_ts, df_sched, use_gemini=True if api_key else False)
+    except Exception as e:
+        st.error(f"エラーが発生しました: {e}")
+        st.session_state['run_analysis'] = False
