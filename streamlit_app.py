@@ -95,6 +95,7 @@ def jp_feat_name(col_name: str) -> str:
         '集中判定': '集中判定', '疲労判定': '疲労判定', '強い疲労判定': '強い疲労判定',
         '眠気判定': '眠気判定', '強い眠気判定': '強い眠気判定',
         '集中状態': '集中状態', '眠気状態': '眠気状態', '疲労状態': '疲労状態',
+        '休憩判定': '休憩判定', '短時間歩行': '短時間歩行',
         '集中継続時間': '集中継続時間', '深い集中継続時間': '深い集中継続時間',
         '疲労状態継続時間': '疲労状態継続時間', '疲労継続時間': '疲労状態継続時間', '高心拍継続時間': '高心拍継続時間'
     }
@@ -128,6 +129,7 @@ def get_base_feature_name(feat: str) -> str:
         '集中判定': '集中判定', '疲労判定': '疲労判定', '強い疲労判定': '強い疲労判定',
         '眠気判定': '眠気判定', '強い眠気判定': '強い眠気判定',
         '集中状態': '集中状態', '眠気状態': '眠気状態', '疲労状態': '疲労状態',
+        '休憩判定': '休憩判定', '短時間歩行': '短時間歩行',
         '集中継続時間': '集中継続時間', '深い集中継続時間': '深い集中継続時間',
         '疲労状態継続時間': '疲労状態継続時間', '疲労継続時間': '疲労状態継続時間', '高心拍継続時間': '高心拍継続時間'
     }
@@ -148,6 +150,7 @@ def get_factor_direction_text(feat: str, val: float, df_all: pd.DataFrame) -> st
         '集中判定': '集中判定', '疲労判定': '疲労判定', '強い疲労判定': '強い疲労判定',
         '眠気判定': '眠気判定', '強い眠気判定': '強い眠気判定',
         '集中状態': '集中状態', '眠気状態': '眠気状態', '疲労状態': '疲労状態',
+        '休憩判定': '休憩判定', '短時間歩行': '短時間歩行',
         '集中継続時間': '集中継続時間', '深い集中継続時間': '深い集中継続時間',
         '疲労状態継続時間': '疲労状態継続時間', '疲労継続時間': '疲労状態継続時間', '高心拍継続時間': '高心拍継続時間'
     }
@@ -162,6 +165,7 @@ def get_factor_direction_text(feat: str, val: float, df_all: pd.DataFrame) -> st
             
     if "_is_missing" in feat: return f"「{base_jp}」が未計測であること"
     elif feat in ["has_schedule", "is_meeting"]: return f"「{base_jp}」が入っていること" if val > 0 else f"「{base_jp}」が入っていないこと"
+    elif feat in ["休憩判定", "短時間歩行"]: return f"「{base_jp}」をしていること" if val > 0 else f"「{base_jp}」をしていないこと"
     elif feat in ["集中状態", "眠気状態", "疲労状態"]: return f"「{base_jp}」が「{val}」であること"
             
     if "_roll_slope" in feat or "_diff1" in feat:
@@ -188,6 +192,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             'LFHF_SCORE_NEW': 'mean', 'TP': 'mean', 'NEMUKE_SCORE_NEW': 'mean',
             'PR_SCORE_NEW': 'mean', 'RMSSD_SCORE_NEW': 'mean', '1分間歩数': 'sum', 'accDeviation': 'mean',
             '集中判定': 'mean', '疲労判定': 'mean', '強い疲労判定': 'mean', '眠気判定': 'mean', '強い眠気判定': 'mean',
+            '休憩判定': 'mean', '短時間歩行': 'mean',
             '集中継続時間': 'mean', '深い集中継続時間': 'mean', '疲労状態継続時間': 'mean', '疲労継続時間': 'mean', '高心拍継続時間': 'mean'
         }
         
@@ -390,6 +395,18 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             if avg_walk_before > avg_walk_overall * 1.2: focus_actions.append("事前に体を動かすこと（少し歩くなど）")
             elif avg_walk_before < avg_walk_overall * 0.8: focus_actions.append("事前に静かな環境で落ち着いて過ごすこと")
 
+    if '短時間歩行' in df_insight.columns and 'focus_start' in df_insight.columns:
+        walk_before = df_insight['短時間歩行'].shift(1)[df_insight['focus_start']].dropna()
+        avg_overall = df_insight['短時間歩行'].mean()
+        if not walk_before.empty and avg_overall > 0:
+            if walk_before.mean() > avg_overall * 1.2: focus_actions.append("事前に短時間歩行（リフレッシュ）を取り入れること")
+
+    if '休憩判定' in df_insight.columns and 'focus_start' in df_insight.columns:
+        rest_before = df_insight['休憩判定'].shift(1)[df_insight['focus_start']].dropna()
+        avg_overall = df_insight['休憩判定'].mean()
+        if not rest_before.empty and avg_overall > 0:
+            if rest_before.mean() > avg_overall * 1.2: focus_actions.append("事前にしっかり休憩をとること")
+
     if 'has_schedule' in df_insight.columns and '集中判定' in df_insight.columns:
         sched_mask = df_insight['has_schedule'] >= 0.5
         sched_blocks = (sched_mask != sched_mask.shift()).cumsum()
@@ -436,6 +453,43 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     fatigue_actions_str = "データ不足のため特定できません" if not fatigue_actions else "、".join(fatigue_actions)
 
+    recovery_actions = []
+    if 'fatigue_start' in df_insight.columns and 'focus_start' in df_insight.columns:
+        fatigue_times, focus_times = df_insight[df_insight['fatigue_start']].index, df_insight[df_insight['focus_start']].index
+        
+        if '短時間歩行' in df_insight.columns:
+            rec_with_walk, rec_no_walk = [], []
+            for fat_time in fatigue_times:
+                future_focus = focus_times[focus_times > fat_time]
+                if len(future_focus) > 0 and future_focus[0].date() == fat_time.date():
+                    first_focus = future_focus[0]
+                    rec_time = (first_focus - fat_time).total_seconds() / 60
+                    period_val = df_insight.loc[fat_time:first_focus, '短時間歩行'].mean()
+                    if pd.notna(period_val):
+                        if period_val > df_insight['短時間歩行'].mean(): rec_with_walk.append(rec_time)
+                        else: rec_no_walk.append(rec_time)
+            if rec_with_walk and rec_no_walk:
+                diff = np.mean(rec_no_walk) - np.mean(rec_with_walk)
+                if diff > 10: recovery_actions.append(f"短時間歩行（動的リフレッシュ）を行うこと（平均{abs(diff):.0f}分早く回復）")
+                elif diff < -10: recovery_actions.append(f"歩き回らず静かに休むこと（平均{abs(diff):.0f}分早く回復）")
+                
+        if '休憩判定' in df_insight.columns:
+            rec_with_rest, rec_no_rest = [], []
+            for fat_time in fatigue_times:
+                future_focus = focus_times[focus_times > fat_time]
+                if len(future_focus) > 0 and future_focus[0].date() == fat_time.date():
+                    first_focus = future_focus[0]
+                    rec_time = (first_focus - fat_time).total_seconds() / 60
+                    period_val = df_insight.loc[fat_time:first_focus, '休憩判定'].mean()
+                    if pd.notna(period_val):
+                        if period_val > df_insight['休憩判定'].mean(): rec_with_rest.append(rec_time)
+                        else: rec_no_rest.append(rec_time)
+            if rec_with_rest and rec_no_rest:
+                diff = np.mean(rec_no_rest) - np.mean(rec_with_rest)
+                if diff > 10: recovery_actions.append(f"意識的に休憩時間をとること（平均{abs(diff):.0f}分早く回復）")
+
+    recovery_actions_str = "データ不足のため特定できません" if not recovery_actions else "、".join(recovery_actions)
+
     # --- 3つのタブを作成 ---
     tab1, tab2, tab3 = st.tabs(["📝 マイ・スペック", "📅 マンスリーインサイト", "☀️ デイリーインサイト"])
     
@@ -450,7 +504,8 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("#### あなたの疲労特性")
         st.markdown(f"　{fat_dow}曜日の{fat_hour}時台に最も疲労しやすい傾向があります。<br>"
-                    f"　疲労しやすい行動は{fatigue_actions_str}", unsafe_allow_html=True)
+                    f"　疲労しやすい行動は{fatigue_actions_str}<br>"
+                    f"　疲労から早く回復する行動は{recovery_actions_str}", unsafe_allow_html=True)
 
         if not focus_durations.empty:
             st.markdown("<br>##### 集中持続時間の分布", unsafe_allow_html=True)
