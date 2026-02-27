@@ -490,8 +490,8 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     recovery_actions_str = "データ不足のため特定できません" if not recovery_actions else "、".join(recovery_actions)
 
-    # --- 3つのタブを作成 ---
-    tab1, tab2, tab3 = st.tabs(["📝 マイ・スペック", "📅 マンスリーインサイト", "☀️ デイリーインサイト"])
+    # --- 4つのタブを作成 ---
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 マイ・スペック", "📅 マンスリーインサイト", "☀️ デイリーインサイト", "📊 行動リターン分析"])
     
     with tab1:
         st.markdown("#### あなたの集中特性")
@@ -742,6 +742,87 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             else:
                 st.write("対象時間帯のデータがない、または「CVRR_SCORE_NEW」が含まれていないため、モメンタルグラフを表示できません。")
 
+    with tab4:
+        st.markdown("#### 行動リターン分析（重回帰分析）")
+        st.markdown("過去のデータから、「休憩」や「短時間歩行」といった行動が、あなたのパフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
+        
+        from sklearn.linear_model import LinearRegression
+        
+        action_cols = []
+        if '休憩判定' in df_imp.columns: action_cols.append('休憩判定')
+        if '短時間歩行' in df_imp.columns: action_cols.append('短時間歩行')
+        
+        control_cols = []
+        if 'is_meeting' in df_imp.columns: control_cols.append('is_meeting')
+        if 'schedule_density_2h' in df_imp.columns: control_cols.append('schedule_density_2h')
+        
+        if not action_cols:
+            st.write("分析に必要な行動データ（「休憩判定」や「短時間歩行」）が存在しません。")
+        else:
+            X_cols = action_cols + control_cols
+            reg_df = df_imp.dropna(subset=X_cols + [target_col])
+            
+            if len(reg_df) > 10:
+                X = reg_df[X_cols]
+                y = reg_df[target_col]
+                
+                model_reg = LinearRegression()
+                model_reg.fit(X, y)
+                
+                coef_dict = {col: coef for col, coef in zip(X_cols, model_reg.coef_) if col in action_cols}
+                
+                # グラフ描画
+                action_names = [jp_feat_name(col) for col in coef_dict.keys()]
+                coef_values = list(coef_dict.values())
+                colors = ['#E24A4A' if c < 0 else '#4AE290' for c in coef_values]
+                
+                fig_roi = go.Figure(data=[go.Bar(
+                    x=action_names, 
+                    y=coef_values, 
+                    marker_color=colors,
+                    text=[f"{c*100:+.1f} pt" for c in coef_values],
+                    textposition='auto',
+                    hovertemplate="行動: %{x}<br>効果量: %{y:+.3f}<extra></extra>"
+                )])
+                
+                target_label = jp_feat_name(target_col)
+                fig_roi.update_layout(
+                    title=f"各行動が「{target_label}」に与える純粋な効果量",
+                    xaxis_title="行動",
+                    yaxis_title="効果量 (係数)",
+                    height=350,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    plot_bgcolor='rgba(0,0,0,0)'
+                )
+                fig_roi.update_yaxes(showgrid=True, gridcolor='lightgray', zeroline=True, zerolinecolor='black', zerolinewidth=1)
+                st.plotly_chart(fig_roi, use_container_width=True)
+                
+                # インサイトの生成
+                st.markdown("##### 💡 分析結果（行動の投資対効果）")
+                for col, coef in coef_dict.items():
+                    action_name = jp_feat_name(col)
+                    effect_pt = coef * 100
+                    
+                    if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定', '眠気判定', '強い眠気判定']:
+                        # 悪化系の指標の場合（マイナスが良い効果）
+                        if coef < -0.01:
+                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。")
+                        elif coef > 0.01:
+                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。")
+                        else:
+                            st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                    else:
+                        # 好転系の指標の場合（プラスが良い効果）
+                        if coef > 0.01:
+                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。")
+                        elif coef < -0.01:
+                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。")
+                        else:
+                            st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                            
+                st.caption("※この結果は「予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を重回帰分析によって統計的に除去し、行動そのものの純粋な効果（偏回帰係数）を抽出したものです。")
+            else:
+                st.write("有効なデータが少なすぎるため、統計分析を実行できません。")
 
     # =========================================================================
     # リアルタイム予測 (Real-time Focus)
