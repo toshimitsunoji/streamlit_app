@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, roc_auc_score, log_loss
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.tree import DecisionTreeRegressor, _tree
 import google.generativeai as genai
 import shap
 import warnings
@@ -890,6 +891,88 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                             st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                             
                 st.caption("※この結果は「現在の予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を統計的に除去し、直前の行動そのものの純粋な効果を抽出したものです。")
+                
+                # --- 決定木分析によるマイルール抽出 ---
+                st.markdown("---")
+                st.markdown("##### 🌳 条件の組み合わせ分析（マイ・ルール抽出）")
+                st.write("決定木アルゴリズムを用いて、複数の条件（予定の状況と直前の行動）が組み合わさった時に、パフォーマンスがどう変化するかを分析します。")
+                
+                # ツリーモデルの学習
+                tree_model = DecisionTreeRegressor(max_depth=3, min_samples_leaf=5, random_state=42)
+                tree_model.fit(X, y)
+                
+                # 特徴量表示名と真偽値判定のリスト作成
+                feature_display_names = []
+                feature_is_bool = []
+                for col in X_cols:
+                    feature_is_bool.append(reg_df[col].dropna().nunique() <= 2)
+                    if col == 'is_meeting':
+                        feature_display_names.append("会議中")
+                    elif col == 'schedule_density_2h':
+                        feature_display_names.append("予定密度")
+                    elif '_前' in col:
+                        base = get_base_feature_name(col.replace('_前', ''))
+                        feature_display_names.append(f"直前の{base}")
+                    else:
+                        feature_display_names.append(jp_feat_name(col))
+
+                def extract_rules(tree, feature_names, is_bool_list):
+                    tree_ = tree.tree_
+                    feature_name = [
+                        feature_names[i] if i != _tree.TREE_UNDEFINED else "undefined!"
+                        for i in tree_.feature
+                    ]
+                    rules = []
+                    def recurse(node, current_rule):
+                        if tree_.feature[node] != _tree.TREE_UNDEFINED:
+                            name = feature_name[node]
+                            threshold = tree_.threshold[node]
+                            is_bool = is_bool_list[tree_.feature[node]]
+                            
+                            left_rule = current_rule.copy()
+                            if is_bool:
+                                left_rule.append(f"【{name}：なし】")
+                            else:
+                                left_rule.append(f"【{name}が低い (≦{threshold:.2f})】")
+                            recurse(tree_.children_left[node], left_rule)
+                            
+                            right_rule = current_rule.copy()
+                            if is_bool:
+                                right_rule.append(f"【{name}：あり】")
+                            else:
+                                right_rule.append(f"【{name}が高い (>{threshold:.2f})】")
+                            recurse(tree_.children_right[node], right_rule)
+                        else:
+                            val = tree_.value[node][0][0]
+                            samples = tree_.n_node_samples[node]
+                            rules.append((" ＋ ".join(current_rule), val, samples))
+                    recurse(0, [])
+                    return rules
+                
+                tree_rules = extract_rules(tree_model, feature_display_names, feature_is_bool)
+                is_negative_target = target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定', '眠気判定', '強い眠気判定']
+                
+                # サンプル数が全体の5%以上のルールのみ抽出
+                min_samples_threshold = max(3, int(len(reg_df) * 0.05))
+                valid_rules = [r for r in tree_rules if r[2] >= min_samples_threshold]
+                if not valid_rules:
+                    valid_rules = tree_rules
+                
+                valid_rules.sort(key=lambda x: x[1], reverse=not is_negative_target)
+                
+                st.markdown(f"**🎯 あなたの「{target_label}」に関する条件パターンランキング**")
+                
+                if is_negative_target:
+                    st.write(f"※スコアが**低い**（発生確率が低い）パターンほど上位（良い条件）として表示しています。")
+                else:
+                    st.write(f"※スコアが**高い**（発生確率が高い）パターンほど上位（良い条件）として表示しています。")
+
+                for i, (rule_text, val, samples) in enumerate(valid_rules[:5]):
+                    rank_icon = ["🥇", "🥈", "🥉", "④", "⑤"][i] if i < 5 else f"{i+1}位"
+                    display_val = val * 100
+                    st.markdown(f"{rank_icon} **第{i+1}位** (データ数: {samples}件)")
+                    st.markdown(f"　条件： {rule_text}")
+                    st.markdown(f"　👉 予想スコア: **{display_val:.1f} pt**")
                 
                 # --- 分析データのダウンロードボタン追加 ---
                 st.markdown("---")
