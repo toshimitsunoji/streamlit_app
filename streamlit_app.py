@@ -492,6 +492,9 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 df_m_hourly['hour'] = df_m_hourly.index.hour
                 df_m_hourly['dow'] = df_m_hourly.index.dayofweek
                 
+                # 設定された時間帯（time_range）のリストを作成
+                target_hours = list(range(time_range[0], time_range[1] + 1))
+                
                 # グラフ: 曜日別・時間帯別
                 col_m1, col_m2 = st.columns(2)
                 
@@ -502,21 +505,22 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     st.plotly_chart(fig_dow, use_container_width=True)
                     
                 with col_m2:
-                    hour_sum = df_m_hourly.groupby('hour')['集中判定_フラグ'].sum().reindex(range(24), fill_value=0)
-                    fig_hour = px.bar(x=[f"{h}:00" for h in range(24)], y=hour_sum.values, labels={'x': '時間帯', 'y': '集中判定回数'}, title="時間帯別 集中判定回数")
+                    # 時間帯を対象時間帯のみに絞り込む
+                    hour_sum = df_m_hourly.groupby('hour')['集中判定_フラグ'].sum().reindex(target_hours, fill_value=0)
+                    fig_hour = px.bar(x=[f"{h}:00" for h in target_hours], y=hour_sum.values, labels={'x': '時間帯', 'y': '集中判定回数'}, title="時間帯別 集中判定回数")
                     fig_hour.update_traces(marker_color='#4A90E2')
                     st.plotly_chart(fig_hour, use_container_width=True)
                 
                 # グラフ: 日×時間のヒートマップ
                 st.markdown("#### 日付×時間帯の集中判定回数 (赤枠は予定あり)")
                 hm_pivot = df_m_hourly.pivot_table(index='day', columns='hour', values='集中判定_フラグ', aggfunc='sum').fillna(0)
-                # 欠けている日・時間を補完
+                # 欠けている日・時間を補完し、対象時間帯のみに絞り込む
                 all_days = list(range(1, df_month.index.days_in_month[0] + 1))
-                hm_pivot = hm_pivot.reindex(index=all_days, columns=list(range(24)), fill_value=0)
+                hm_pivot = hm_pivot.reindex(index=all_days, columns=target_hours, fill_value=0)
                 
                 fig_hm_month = go.Figure(data=go.Heatmap(
                     z=hm_pivot.values,
-                    x=[f"{h}:00" for h in range(24)],
+                    x=[f"{h}:00" for h in target_hours],
                     y=[f"{d}日" for d in all_days],
                     colorscale='Blues',
                     hovertemplate="日付: %{y}<br>時間帯: %{x}<br>集中回数: %{z}<extra></extra>"
@@ -526,15 +530,17 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 shapes = []
                 if df_sched is not None and not df_sched.empty:
                     for d in all_days:
-                        for h in range(24):
+                        for h in target_hours:
                             try:
                                 dt_start = pd.to_datetime(f"{selected_month}-{d:02d} {h:02d}:00:00")
                                 dt_end = dt_start + pd.Timedelta('1H')
                                 has_sched = ((df_sched['start_dt'] < dt_end) & (df_sched['end_dt'] > dt_start)).any()
                                 if has_sched:
+                                    # 横軸が絞り込まれたため、インデックスを計算し直す
+                                    x_idx = h - time_range[0]
                                     shapes.append(dict(
                                         type="rect",
-                                        x0=h - 0.5, x1=h + 0.5,
+                                        x0=x_idx - 0.5, x1=x_idx + 0.5,
                                         y0=d - 1 - 0.5, y1=d - 1 + 0.5, # y0,y1 はインデックス(0始まり)で指定
                                         line=dict(color="red", width=2),
                                         fillcolor="rgba(0,0,0,0)"
@@ -571,22 +577,60 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             selected_day = st.selectbox("分析対象とする年月日を選択してください", available_days)
             df_day = df_ts[df_ts['date_str'] == selected_day].copy()
             
-            if 'CVRR_SCORE_NEW' in df_day.columns:
+            # 設定された時間帯（time_range）でデータをフィルタリング
+            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+            
+            if 'CVRR_SCORE_NEW' in df_day.columns and not df_day.empty:
                 st.markdown("#### モメンタルグラフ (集中の波)")
                 
+                base_val = 50.0 # 基準となる平均値
+                
                 fig_daily = go.Figure()
+                
+                # 基準線(50)を描画（ホバーはスキップ）
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=[base_val]*len(df_day),
+                    mode='lines', line=dict(color='gray', width=1, dash='dash'),
+                    name='基準(50)', hoverinfo='skip'
+                ))
+                
+                # 上側（集中）の青い面
+                y_upper = np.where(df_day['CVRR_SCORE_NEW'] >= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=y_upper,
+                    fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', # 青系
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # 下側の面を描くために、ベースラインをもう一度引く
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=[base_val]*len(df_day),
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # 下側（緩和）のオレンジ系の面
+                y_lower = np.where(df_day['CVRR_SCORE_NEW'] <= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                fig_daily.add_trace(go.Scatter(
+                    x=df_day.index, y=y_lower,
+                    fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', # オレンジ系
+                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                    showlegend=False, hoverinfo='skip'
+                ))
+                
+                # ホバー・表示用の実際の推移線（黒色）
                 fig_daily.add_trace(go.Scatter(
                     x=df_day.index, 
                     y=df_day['CVRR_SCORE_NEW'],
-                    fill='tozeroy',
                     mode='lines',
-                    line=dict(color='#00B5E2', width=2),
+                    line=dict(color='#333333', width=2),
                     name='CVRR SCORE',
                     hovertemplate="時刻: %{x|%H:%M}<br>スコア: %{y:.1f}<extra></extra>"
                 ))
                 
                 fig_daily.update_layout(
-                    title=f"{selected_day} の集中と緩和の推移",
+                    title=f"{selected_day} の集中と緩和の推移 ({time_range[0]}時〜{time_range[1]}時)",
                     xaxis_title="時刻",
                     yaxis_title="CVRR SCORE (集中度合い)",
                     height=400,
@@ -605,13 +649,13 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     avg_val = df_day['CVRR_SCORE_NEW'].mean()
                     
                     st.info(f"**【{selected_day} のデイリーインサイト】**\n\n"
-                            f"- この日の集中（CVRR SCORE）のピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
-                            f"- 1日の平均スコアは **{avg_val:.1f}** となっています。\n"
-                            f"- グラフの山が高い時間帯ほど集中度が高く、谷が深い時間帯ほど緩和（リラックス）状態にあることを示しています。")
+                            f"- この日の設定時間帯（{time_range[0]}時〜{time_range[1]}時）における集中（CVRR SCORE）のピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
+                            f"- 平均スコアは **{avg_val:.1f}** となっています。\n"
+                            f"- グラフにおいて基準値(50)より上側の**青い面**が「集中」している状態、下側の**オレンジの面**が「緩和（リラックス）」している状態を示しています。")
                 else:
                     st.write("この日の有効なスコアデータがありません。")
             else:
-                st.write("データに「CVRR_SCORE_NEW」が含まれていないため、モメンタルグラフを表示できません。")
+                st.write("対象時間帯のデータがない、または「CVRR_SCORE_NEW」が含まれていないため、モメンタルグラフを表示できません。")
 
 
     # =========================================================================
