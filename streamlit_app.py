@@ -745,16 +745,18 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     with tab4:
         st.markdown("#### 行動リターン分析（重回帰分析）")
-        st.markdown(f"過去のデータから、「直前（{RESAMPLE_FREQ}前）の休憩」や「短時間歩行」といった行動が、その後のパフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
+        st.markdown(f"過去のデータから、「現在」および「直前（{RESAMPLE_FREQ}前）」の休憩や短時間歩行といった行動が、パフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
         
         reg_df = df_imp.copy()
         lag_steps = 1 # 直前（1ステップ前）の行動を評価するためにシフト
         
         action_cols = []
         if '休憩判定' in reg_df.columns: 
+            action_cols.append('休憩判定')
             reg_df['休憩判定_前'] = reg_df['休憩判定'].shift(lag_steps)
             action_cols.append('休憩判定_前')
         if '短時間歩行' in reg_df.columns: 
+            action_cols.append('短時間歩行')
             reg_df['短時間歩行_前'] = reg_df['短時間歩行'].shift(lag_steps)
             action_cols.append('短時間歩行_前')
         
@@ -803,9 +805,15 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     for col in results.params.index:
                         if col == "const":
                             col_name = "定数項 (Intercept)"
-                        else:
+                        elif '_前' in col:
                             base_name = jp_feat_name(col.replace('_前', ''))
-                            col_name = f"直前の「{base_name}」" if '_前' in col else f"現在の「{base_name}」"
+                            col_name = f"直前の「{base_name}」"
+                        else:
+                            base_name = jp_feat_name(col)
+                            if col in ['休憩判定', '短時間歩行']:
+                                col_name = f"現在の「{base_name}」"
+                            else:
+                                col_name = f"「{base_name}」"
                             
                         pval = results.pvalues[col]
                         sig = "⭐ 有意" if pval < 0.05 else "ー"
@@ -837,7 +845,13 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     pvalue_dict = {col: np.nan for col in action_cols}
 
                 # グラフ描画
-                action_names = [f"直前の「{jp_feat_name(col.replace('_前', ''))}」" for col in coef_dict.keys()]
+                action_names = []
+                for col in coef_dict.keys():
+                    if '_前' in col:
+                        action_names.append(f"直前の「{jp_feat_name(col.replace('_前', ''))}」")
+                    else:
+                        action_names.append(f"現在の「{jp_feat_name(col)}」")
+
                 coef_values = list(coef_dict.values())
                 colors = ['#E24A4A' if c < 0 else '#4AE290' for c in coef_values]
                 
@@ -852,10 +866,10 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 
                 target_label = jp_feat_name(target_col)
                 fig_roi.update_layout(
-                    title=f"直前の行動が「{target_label}」に与える純粋な効果量",
+                    title=f"各行動が「{target_label}」に与える純粋な効果量",
                     xaxis_title="行動",
                     yaxis_title="効果量 (係数)",
-                    height=350,
+                    height=400,
                     margin=dict(l=20, r=20, t=40, b=20),
                     plot_bgcolor='rgba(0,0,0,0)'
                 )
@@ -865,7 +879,11 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 # インサイトの生成
                 st.markdown("##### 💡 分析結果（行動の投資対効果）")
                 for col, coef in coef_dict.items():
-                    action_name = jp_feat_name(col.replace('_前', ''))
+                    if '_前' in col:
+                        action_desc = f"事前に「{jp_feat_name(col.replace('_前', ''))}」を行うこと"
+                    else:
+                        action_desc = f"現在「{jp_feat_name(col)}」を行うこと"
+
                     effect_pt = coef * 100
                     pval = pvalue_dict.get(col, np.nan)
                     
@@ -876,26 +894,26 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定', '眠気判定', '強い眠気判定']:
                         # 悪化系の指標の場合（マイナスが良い効果）
                         if coef < -0.01:
-                            st.write(f"- 🟢 **事前に「{action_name}」を行うこと**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。{sig_note}")
+                            st.write(f"- 🟢 **{action_desc}**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。{sig_note}")
                         elif coef > 0.01:
-                            st.write(f"- 🔴 **事前に「{action_name}」を行うこと**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。{sig_note}")
+                            st.write(f"- 🔴 **{action_desc}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。{sig_note}")
                         else:
-                            st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                            st.write(f"- ⚪ **{action_desc}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                     else:
                         # 好転系の指標の場合（プラスが良い効果）
                         if coef > 0.01:
-                            st.write(f"- 🟢 **事前に「{action_name}」を行うこと**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。{sig_note}")
+                            st.write(f"- 🟢 **{action_desc}**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。{sig_note}")
                         elif coef < -0.01:
-                            st.write(f"- 🔴 **事前に「{action_name}」を行うこと**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。{sig_note}")
+                            st.write(f"- 🔴 **{action_desc}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。{sig_note}")
                         else:
-                            st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                            st.write(f"- ⚪ **{action_desc}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                             
-                st.caption("※この結果は「現在の予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を統計的に除去し、直前の行動そのものの純粋な効果を抽出したものです。")
+                st.caption("※この結果は「現在の予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を統計的に除去し、行動そのものの純粋な効果を抽出したものです。")
                 
                 # --- 決定木分析によるマイルール抽出 ---
                 st.markdown("---")
                 st.markdown("##### 🌳 条件の組み合わせ分析（マイ・ルール抽出）")
-                st.write("決定木アルゴリズムを用いて、複数の条件（予定の状況と直前の行動）が組み合わさった時に、パフォーマンスがどう変化するかを分析します。")
+                st.write("決定木アルゴリズムを用いて、複数の条件（予定の状況と行動）が組み合わさった時に、パフォーマンスがどう変化するかを分析します。")
                 
                 # ツリーモデルの学習 (分かりやすくするため深さを2に制限)
                 from sklearn.tree import DecisionTreeRegressor, _tree, plot_tree
@@ -915,7 +933,11 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                         base = get_base_feature_name(col.replace('_前', ''))
                         feature_display_names.append(f"直前の{base}")
                     else:
-                        feature_display_names.append(jp_feat_name(col))
+                        base = get_base_feature_name(col)
+                        if col in ['休憩判定', '短時間歩行']:
+                            feature_display_names.append(f"現在の{base}")
+                        else:
+                            feature_display_names.append(jp_feat_name(col))
 
                 def extract_rules(tree, feature_names, is_bool_list):
                     tree_ = tree.tree_
