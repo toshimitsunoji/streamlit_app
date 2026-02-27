@@ -116,9 +116,29 @@ def get_base_feature_name(feat: str) -> str:
     return feat
 
 def get_factor_direction_text(feat: str, val: float, df_all: pd.DataFrame) -> str:
-    base_jp = get_base_feature_name(feat)
-    remainder = feat[len([k for k,v in {**locals()}.items() if base_jp == v] or [feat])[0]:] if base_jp != feat else ""
+    mapping = {
+        'CVRR_SCORE_NEW': '集中スコア', 'SkinTemp': '皮膚温度', 'LP_SCORE_NEW': 'リラックススコア',
+        'LFHF_SCORE_NEW': 'LF/HF(自律神経バランス)', 'TP': 'TP(自律神経トータルパワー)', 'NEMUKE_SCORE_NEW': '低覚醒スコア',
+        'PR_SCORE_NEW': '脈拍', 'RMSSD_SCORE_NEW': '疲労・回復スコア', '1分間歩数': '歩数', 'accDeviation': '活動量(加速度)',
+        'has_schedule': '予定', 'is_meeting': '会議', 'schedule_density_2h': '予定の密度',
+        'time_to_next_event_min': '次の予定までの時間', 'time_since_prev_event_min': '前の予定からの経過時間',
+        'daily_schedule_hours': '1日の総予定時間', 'consecutive_schedules': '連続予定ブロック数',
+        '今日からの累積歩数': '今日からの累積歩数', '今日からの累積会議時間_分': '今日からの累積会議時間',
+        '現在の集中継続時間_分': '現在の集中継続時間', '現在の疲労継続時間_分': '現在の疲労継続時間',
+        '集中判定': '集中判定', '疲労判定': '疲労判定', '強い疲労判定': '強い疲労判定',
+        '集中状態': '集中状態', '眠気状態': '眠気状態', '疲労状態': '疲労状態',
+        '集中継続時間': '集中継続時間', '深い集中継続時間': '深い集中継続時間',
+        '疲労状態継続時間': '疲労状態継続時間', '疲労継続時間': '疲労状態継続時間', '高心拍継続時間': '高心拍継続時間'
+    }
     
+    base_jp = feat
+    remainder = ""
+    for k, v in mapping.items():
+        if feat.startswith(k):
+            base_jp = v
+            remainder = feat[len(k):]
+            break
+            
     if "_is_missing" in feat: return f"「{base_jp}」が未計測であること"
     elif feat in ["has_schedule", "is_meeting"]: return f"「{base_jp}」が入っていること" if val > 0 else f"「{base_jp}」が入っていないこと"
     elif feat in ["集中状態", "眠気状態", "疲労状態"]: return f"「{base_jp}」が「{val}」であること"
@@ -705,9 +725,9 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             
         st.caption(bar_desc)
 
-    schedule_density = float(target_data["schedule_density_2h"].values[0]) if "schedule_density_2h" in target_data else 0
-    time_to_next = float(target_data["time_to_next_event_min"].values[0]) if "time_to_next_event_min" in target_data else np.nan
-    is_meeting = float(target_data["is_meeting"].values[0]) if "is_meeting" in target_data else 0
+    schedule_density = float(target_data["schedule_density_2h"].values[0]) if "schedule_density_2h" in target_data.columns else 0
+    time_to_next = float(target_data["time_to_next_event_min"].values[0]) if "time_to_next_event_min" in target_data.columns else np.nan
+    is_meeting = float(target_data["is_meeting"].values[0]) if "is_meeting" in target_data.columns else 0
     
     state_trend_prob = 1.0 - current_proba if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定'] else current_proba
 
@@ -760,11 +780,24 @@ with col_file2:
 
 if st.button("🚀 分析を実行する", type="primary"):
     if file_ts is not None:
-        try:
-            df_ts = pd.read_csv(file_ts, skiprows=2)
-            df_sched = pd.read_csv(file_sched) if file_sched is not None else None
-            run_analysis(df_ts, df_sched, use_gemini=True if api_key else False)
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
+        # 分析実行フラグをセッションに保存（画面再描画で消えないようにする）
+        st.session_state['run_analysis'] = True
     else:
         st.warning("⚠️ 生体データ (CSV形式) をアップロードしてください。")
+
+# セッションにフラグがある場合のみ分析を実行・表示し続ける
+if st.session_state.get('run_analysis', False) and file_ts is not None:
+    try:
+        # ドロップダウン変更時の再読み込みエラーを防ぐためにポインタを先頭に戻す
+        file_ts.seek(0)
+        df_ts = pd.read_csv(file_ts, skiprows=2)
+        
+        df_sched = None
+        if file_sched is not None:
+            file_sched.seek(0)
+            df_sched = pd.read_csv(file_sched)
+            
+        run_analysis(df_ts, df_sched, use_gemini=True if api_key else False)
+    except Exception as e:
+        st.error(f"エラーが発生しました: {e}")
+        st.session_state['run_analysis'] = False
