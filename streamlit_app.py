@@ -897,8 +897,9 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 st.markdown("##### 🌳 条件の組み合わせ分析（マイ・ルール抽出）")
                 st.write("決定木アルゴリズムを用いて、複数の条件（予定の状況と直前の行動）が組み合わさった時に、パフォーマンスがどう変化するかを分析します。")
                 
-                # ツリーモデルの学習
-                tree_model = DecisionTreeRegressor(max_depth=3, min_samples_leaf=5, random_state=42)
+                # ツリーモデルの学習 (分かりやすくするため深さを2に制限)
+                from sklearn.tree import DecisionTreeRegressor, _tree, plot_tree
+                tree_model = DecisionTreeRegressor(max_depth=2, min_samples_leaf=5, random_state=42)
                 tree_model.fit(X, y)
                 
                 # 特徴量表示名と真偽値判定のリスト作成
@@ -960,19 +961,28 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 
                 valid_rules.sort(key=lambda x: x[1], reverse=not is_negative_target)
                 
-                st.markdown(f"**🎯 あなたの「{target_label}」に関する条件パターンランキング**")
+                st.markdown(f"**🎯 あなたの「{target_label}」に関するベスト条件パターン**")
                 
                 if is_negative_target:
-                    st.write(f"※スコアが**低い**（発生確率が低い）パターンほど上位（良い条件）として表示しています。")
+                    st.write(f"※スコアが**低い**（発生確率が低い）パターンをベスト条件として表示しています。")
                 else:
-                    st.write(f"※スコアが**高い**（発生確率が高い）パターンほど上位（良い条件）として表示しています。")
+                    st.write(f"※スコアが**高い**（発生確率が高い）パターンをベスト条件として表示しています。")
 
-                for i, (rule_text, val, samples) in enumerate(valid_rules[:5]):
-                    rank_icon = ["🥇", "🥈", "🥉", "④", "⑤"][i] if i < 5 else f"{i+1}位"
+                if valid_rules:
+                    rule_text, val, samples = valid_rules[0]
                     display_val = val * 100
-                    st.markdown(f"{rank_icon} **第{i+1}位** (データ数: {samples}件)")
+                    st.markdown(f"🥇 **第1位** (データ数: {samples}件)")
                     st.markdown(f"　条件： {rule_text}")
                     st.markdown(f"　👉 予想スコア: **{display_val:.1f} pt**")
+                else:
+                    st.write("有効なルールが見つかりませんでした。")
+                    
+                # 樹形図の描画
+                st.markdown("##### 🌿 決定木の樹形図")
+                st.caption("※ 一番上のハコからスタートし、条件が「True（当てはまる）」なら左へ、「False（当てはまらない）」なら右へ進みます。色の濃さはスコアの高低を表します。")
+                fig_tree, ax_tree = plt.subplots(figsize=(10, 6))
+                plot_tree(tree_model, feature_names=feature_display_names, filled=True, rounded=True, ax=ax_tree, fontsize=12, precision=2)
+                st.pyplot(fig_tree)
                 
                 # --- 分析データのダウンロードボタン追加 ---
                 st.markdown("---")
