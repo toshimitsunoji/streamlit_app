@@ -744,21 +744,28 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     with tab4:
         st.markdown("#### 行動リターン分析（重回帰分析）")
-        st.markdown("過去のデータから、「休憩」や「短時間歩行」といった行動が、あなたのパフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
+        st.markdown(f"過去のデータから、「直前（{RESAMPLE_FREQ}前）の休憩」や「短時間歩行」といった行動が、その後のパフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
+        
+        reg_df = df_imp.copy()
+        lag_steps = 1 # 直前（1ステップ前）の行動を評価するためにシフト
         
         action_cols = []
-        if '休憩判定' in df_imp.columns: action_cols.append('休憩判定')
-        if '短時間歩行' in df_imp.columns: action_cols.append('短時間歩行')
+        if '休憩判定' in reg_df.columns: 
+            reg_df['休憩判定_前'] = reg_df['休憩判定'].shift(lag_steps)
+            action_cols.append('休憩判定_前')
+        if '短時間歩行' in reg_df.columns: 
+            reg_df['短時間歩行_前'] = reg_df['短時間歩行'].shift(lag_steps)
+            action_cols.append('短時間歩行_前')
         
         control_cols = []
-        if 'is_meeting' in df_imp.columns: control_cols.append('is_meeting')
-        if 'schedule_density_2h' in df_imp.columns: control_cols.append('schedule_density_2h')
+        if 'is_meeting' in reg_df.columns: control_cols.append('is_meeting')
+        if 'schedule_density_2h' in reg_df.columns: control_cols.append('schedule_density_2h')
         
         if not action_cols:
             st.write("分析に必要な行動データ（「休憩判定」や「短時間歩行」）が存在しません。")
         else:
             X_cols = action_cols + control_cols
-            reg_df = df_imp.dropna(subset=X_cols + [target_col])
+            reg_df = reg_df.dropna(subset=X_cols + [target_col])
             
             if len(reg_df) > 10:
                 X = reg_df[X_cols].astype(float)
@@ -793,7 +800,12 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     st.markdown("##### 📝 回帰係数とP値の詳細")
                     detail_data = []
                     for col in results.params.index:
-                        col_name = "定数項 (Intercept)" if col == "const" else jp_feat_name(col)
+                        if col == "const":
+                            col_name = "定数項 (Intercept)"
+                        else:
+                            base_name = jp_feat_name(col.replace('_前', ''))
+                            col_name = f"直前の「{base_name}」" if '_前' in col else f"現在の「{base_name}」"
+                            
                         pval = results.pvalues[col]
                         sig = "⭐ 有意" if pval < 0.05 else "ー"
                         
@@ -824,7 +836,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     pvalue_dict = {col: np.nan for col in action_cols}
 
                 # グラフ描画
-                action_names = [jp_feat_name(col) for col in coef_dict.keys()]
+                action_names = [f"直前の「{jp_feat_name(col.replace('_前', ''))}」" for col in coef_dict.keys()]
                 coef_values = list(coef_dict.values())
                 colors = ['#E24A4A' if c < 0 else '#4AE290' for c in coef_values]
                 
@@ -839,7 +851,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 
                 target_label = jp_feat_name(target_col)
                 fig_roi.update_layout(
-                    title=f"各行動が「{target_label}」に与える純粋な効果量",
+                    title=f"直前の行動が「{target_label}」に与える純粋な効果量",
                     xaxis_title="行動",
                     yaxis_title="効果量 (係数)",
                     height=350,
@@ -852,7 +864,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 # インサイトの生成
                 st.markdown("##### 💡 分析結果（行動の投資対効果）")
                 for col, coef in coef_dict.items():
-                    action_name = jp_feat_name(col)
+                    action_name = jp_feat_name(col.replace('_前', ''))
                     effect_pt = coef * 100
                     pval = pvalue_dict.get(col, np.nan)
                     
@@ -863,21 +875,21 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                     if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定', '眠気判定', '強い眠気判定']:
                         # 悪化系の指標の場合（マイナスが良い効果）
                         if coef < -0.01:
-                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。{sig_note}")
+                            st.write(f"- 🟢 **事前に「{action_name}」を行うこと**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。{sig_note}")
                         elif coef > 0.01:
-                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。{sig_note}")
+                            st.write(f"- 🔴 **事前に「{action_name}」を行うこと**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。{sig_note}")
                         else:
-                            st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                            st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                     else:
                         # 好転系の指標の場合（プラスが良い効果）
                         if coef > 0.01:
-                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。{sig_note}")
+                            st.write(f"- 🟢 **事前に「{action_name}」を行うこと**: 「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。{sig_note}")
                         elif coef < -0.01:
-                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。{sig_note}")
+                            st.write(f"- 🔴 **事前に「{action_name}」を行うこと**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。{sig_note}")
                         else:
-                            st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
+                            st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                             
-                st.caption("※この結果は「予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を重回帰分析によって統計的に除去し、行動そのものの純粋な効果（偏回帰係数）を抽出したものです。")
+                st.caption("※この結果は「現在の予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を統計的に除去し、直前の行動そのものの純粋な効果を抽出したものです。")
             else:
                 st.write("有効なデータが少なすぎるため、統計分析を実行できません。")
 
