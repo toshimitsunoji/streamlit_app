@@ -746,8 +746,6 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
         st.markdown("#### 行動リターン分析（重回帰分析）")
         st.markdown("過去のデータから、「休憩」や「短時間歩行」といった行動が、あなたのパフォーマンスにどれだけのプラス/マイナス効果を与えているかを統計的に算出します。")
         
-        from sklearn.linear_model import LinearRegression
-        
         action_cols = []
         if '休憩判定' in df_imp.columns: action_cols.append('休憩判定')
         if '短時間歩行' in df_imp.columns: action_cols.append('短時間歩行')
@@ -763,14 +761,68 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             reg_df = df_imp.dropna(subset=X_cols + [target_col])
             
             if len(reg_df) > 10:
-                X = reg_df[X_cols]
-                y = reg_df[target_col]
+                X = reg_df[X_cols].astype(float)
+                y = reg_df[target_col].astype(float)
                 
-                model_reg = LinearRegression()
-                model_reg.fit(X, y)
-                
-                coef_dict = {col: coef for col, coef in zip(X_cols, model_reg.coef_) if col in action_cols}
-                
+                try:
+                    import statsmodels.api as sm
+                    # 定数項（切片）を追加してOLSモデルを学習
+                    X_sm = sm.add_constant(X)
+                    model_sm = sm.OLS(y, X_sm)
+                    results = model_sm.fit()
+                    
+                    # 統計値の取得
+                    nobs = int(results.nobs)
+                    r2 = results.rsquared
+                    r2_adj = results.rsquared_adj
+                    
+                    coef_dict = {}
+                    pvalue_dict = {}
+                    for col in action_cols:
+                        if col in results.params:
+                            coef_dict[col] = results.params[col]
+                            pvalue_dict[col] = results.pvalues[col]
+                    
+                    # --- 統計サマリの表示 ---
+                    st.markdown("##### 📈 統計サマリ")
+                    col_s1, col_s2, col_s3 = st.columns(3)
+                    col_s1.metric("サンプル数 (n)", f"{nobs} 件")
+                    col_s2.metric("決定係数 (R²)", f"{r2:.3f}")
+                    col_s3.metric("自由度調整済 R²", f"{r2_adj:.3f}")
+                    
+                    st.markdown("##### 📝 回帰係数とP値の詳細")
+                    detail_data = []
+                    for col in results.params.index:
+                        col_name = "定数項 (Intercept)" if col == "const" else jp_feat_name(col)
+                        pval = results.pvalues[col]
+                        sig = "⭐ 有意" if pval < 0.05 else "ー"
+                        
+                        detail_data.append({
+                            "変数名": col_name,
+                            "係数 (効果量)": results.params[col],
+                            "標準誤差": results.bse[col],
+                            "t値": results.tvalues[col],
+                            "P値": pval,
+                            "有意判定": sig
+                        })
+                    
+                    df_detail = pd.DataFrame(detail_data)
+                    st.dataframe(df_detail.style.format({
+                        "係数 (効果量)": "{:.4f}",
+                        "標準誤差": "{:.4f}",
+                        "t値": "{:.3f}",
+                        "P値": "{:.4f}"
+                    }), use_container_width=True)
+                    st.caption("※ P値が0.05未満（5%水準）の場合、「統計的に有意（偶然ではなく実際に効果がある可能性が高い）」と判定されます。")
+
+                except ImportError:
+                    st.warning("詳細な統計情報を表示するためには `statsmodels` ライブラリが必要です。`requirements.txt` に `statsmodels` を追加してください。今回は `scikit-learn` による簡易分析を表示します。")
+                    from sklearn.linear_model import LinearRegression
+                    model_reg = LinearRegression()
+                    model_reg.fit(X, y)
+                    coef_dict = {col: coef for col, coef in zip(X_cols, model_reg.coef_) if col in action_cols}
+                    pvalue_dict = {col: np.nan for col in action_cols}
+
                 # グラフ描画
                 action_names = [jp_feat_name(col) for col in coef_dict.keys()]
                 coef_values = list(coef_dict.values())
@@ -802,21 +854,26 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 for col, coef in coef_dict.items():
                     action_name = jp_feat_name(col)
                     effect_pt = coef * 100
+                    pval = pvalue_dict.get(col, np.nan)
                     
+                    sig_note = ""
+                    if not np.isnan(pval) and pval >= 0.05:
+                        sig_note = " *(※P値が0.05以上のため、この効果は偶然の誤差の範囲である可能性があります)*"
+
                     if target_col in ['NEMUKE_SCORE_NEW', '疲労判定', '強い疲労判定', '眠気判定', '強い眠気判定']:
                         # 悪化系の指標の場合（マイナスが良い効果）
                         if coef < -0.01:
-                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。")
+                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント抑える** 効果（リフレッシュ効果）が確認されました。{sig_note}")
                         elif coef > 0.01:
-                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。")
+                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント悪化** させてしまう傾向があります。タイミングの見直しが必要かもしれません。{sig_note}")
                         else:
                             st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                     else:
                         # 好転系の指標の場合（プラスが良い効果）
                         if coef > 0.01:
-                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。")
+                            st.write(f"- 🟢 **{action_name}**: 行うことで「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント高める** 効果（ブースト効果）が確認されました。積極的に取り入れましょう。{sig_note}")
                         elif coef < -0.01:
-                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。")
+                            st.write(f"- 🔴 **{action_name}**: 逆に「{target_label}」の発生を **平均 {abs(effect_pt):.1f} ポイント低下** させてしまう傾向があります。{sig_note}")
                         else:
                             st.write(f"- ⚪ **{action_name}**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                             
