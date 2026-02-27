@@ -16,9 +16,25 @@ import warnings
 import math
 import plotly.graph_objects as go
 import plotly.express as px
+from pathlib import Path
+import matplotlib as mpl
+import matplotlib.font_manager as fm
 
 # --- Streamlit ページ設定 ---
 st.set_page_config(page_title="集中・疲労予測システム", layout="wide")
+
+# 日本語フォントの設定 (アップロードされたOTFフォントを適用)
+font_path = Path(__file__).parent / "assets" / "fonts" / "NotoSansCJKjp-Regular.otf"
+if font_path.exists():
+    fm.fontManager.addfont(str(font_path))
+    prop = fm.FontProperties(fname=str(font_path))
+    mpl.rcParams["font.family"] = prop.get_name()
+else:
+    st.warning("⚠️ NotoSansCJKjp-Regular.otf が見つかりません。GitHubで `assets/fonts/` フォルダ内にアップロードされているか確認してください。")
+
+mpl.rcParams["axes.unicode_minus"] = False
+
+warnings.filterwarnings('ignore')
 
 st.title("🧠 ウェアラブル×スケジュール 集中予測システム")
 st.markdown("""
