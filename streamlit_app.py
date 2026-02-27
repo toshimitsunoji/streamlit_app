@@ -890,6 +890,21 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                             st.write(f"- ⚪ **事前に「{action_name}」を行うこと**: 「{target_label}」に対する直接的な増減効果はほとんど見られませんでした。")
                             
                 st.caption("※この結果は「現在の予定の詰まり具合」や「会議中かどうか」といった他の条件（ノイズ）を統計的に除去し、直前の行動そのものの純粋な効果を抽出したものです。")
+                
+                # --- 分析データのダウンロードボタン追加 ---
+                st.markdown("---")
+                st.markdown("##### 📥 データダウンロード")
+                st.write("この重回帰分析に実際に使用されたデータ（欠損値等を除去したクリーンなデータ）をCSVファイルとしてダウンロードできます。")
+                
+                # Excelで開いた際の文字化けを防ぐために utf-8-sig (BOM付きUTF-8) を使用
+                csv_data = reg_df[X_cols + [target_col]].to_csv().encode('utf-8-sig')
+                st.download_button(
+                    label="📊 分析用データをダウンロード (.csv)",
+                    data=csv_data,
+                    file_name='regression_analysis_data.csv',
+                    mime='text/csv',
+                )
+
             else:
                 st.write("有効なデータが少なすぎるため、統計分析を実行できません。")
 
