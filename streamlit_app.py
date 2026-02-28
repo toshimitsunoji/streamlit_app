@@ -204,19 +204,18 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         current_proba = model.predict_proba(target_data[feature_cols])[0, 1]
         
         # ==========================================
-        # 🔋 Focus Battery ロジック (確率的表現の追加)
+        # 🔋 Focus Battery ロジック (単調減少＆レンジ表現に修正)
         # ==========================================
         if '集中判定' in df_ts_min.columns:
             daily_focus = df_ts_min['集中判定'].resample('D').apply(lambda x: (x >= 0.5).sum())
             daily_focus = daily_focus[daily_focus > 0] # 計測がない日は除外
             if not daily_focus.empty:
-                base_focus_mins = daily_focus.median() # 中央値をベースに
-                focus_p25 = daily_focus.quantile(0.25) # 下振れ（不調時）
-                focus_p75 = daily_focus.quantile(0.75) # 上振れ（好調時）
+                avg_focus_mins = daily_focus.mean() # 平均値をベースに
+                focus_p80 = daily_focus.quantile(0.80) # 上振れ（80%タイル・好調時）
             else:
-                base_focus_mins, focus_p25, focus_p75 = 120, 60, 180
+                avg_focus_mins, focus_p80 = 120, 180
         else:
-            base_focus_mins, focus_p25, focus_p75 = 120, 60, 180
+            avg_focus_mins, focus_p80 = 120, 180
             
         today_str = current_time.strftime('%Y-%m-%d')
         if '集中判定' in df_ts_min.columns and today_str in df_ts_min.index.strftime('%Y-%m-%d'):
@@ -225,12 +224,9 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         else:
             consumed_mins = 0
             
-        context_factor = 0.5 + current_proba
-        remaining_battery = max(0, int((base_focus_mins * context_factor) - consumed_mins))
-        rem_p25 = max(0, int((focus_p25 * context_factor) - consumed_mins))
-        rem_p75 = max(0, int((focus_p75 * context_factor) - consumed_mins))
-        
-        battery_delta = int((base_focus_mins * context_factor) - base_focus_mins)
+        # 確率による変動を外し、純粋に「全体のポテンシャル - 消化済」で計算（時間経過で不自然に増えないようにする）
+        rem_avg = max(0, int(avg_focus_mins - consumed_mins))
+        rem_p80 = max(0, int(focus_p80 - consumed_mins))
         
         # ==========================================
         # 🕒 Deep Work Window ロジック (AI予測ベースへ進化)
@@ -295,18 +291,15 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         
         col1, col2 = st.columns([1.2, 1])
         with col1:
-            delta_color = "positive" if battery_delta >= 0 else "negative"
-            delta_sign = "+" if battery_delta >= 0 else ""
             st.markdown(f"""
             <div class="metric-container">
                 <div class="metric-title">🔋 本日の高品質集中</div>
                 <div style="font-size: 1rem; color: #555; margin-bottom: 5px;">
                     本日ここまで: <strong>{consumed_mins} 分</strong> 消化済
                 </div>
-                <div class="metric-value"><span style="font-size: 1.5rem; color: #6c757d;">残り</span> {remaining_battery} <span style="font-size: 1.5rem;">分</span></div>
-                <div class="metric-sub {delta_color}">あなたの基準値比 {delta_sign}{battery_delta}分</div>
+                <div class="metric-value"><span style="font-size: 1.5rem; color: #6c757d;">残り</span> {rem_avg} <span style="font-size: 2rem;">〜</span> {rem_p80} <span style="font-size: 1.5rem;">分</span></div>
                 <div style="font-size: 0.95rem; color: #6c757d; margin-top: 12px; font-weight: 500;">
-                    📉 不調時想定: {rem_p25}分 　〜　 🚀 好調時想定: {rem_p75}分
+                    ※ 平均値({int(avg_focus_mins)}分) 〜 好調時({int(focus_p80)}分) の予測レンジ
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -329,22 +322,21 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         st.markdown("### 🔮 アクション・シミュレーター (事前予測)")
         st.write("「今からどう行動を変えれば、どれくらいパフォーマンスが回復するか？」をAIが事前計算しました。")
         
-        def simulate_battery(mod_dict):
+        def simulate_battery_gain(mod_dict):
             sim_data = target_data[feature_cols].copy()
             for k, v in mod_dict.items():
                 if k in sim_data.columns: sim_data[k] = v
             sim_proba = model.predict_proba(sim_data)[0, 1]
             
-            # 効果を体感しやすくするため、変動分の感度を調整（モデルが重視するラグ変数も合わせて変更し、さらに差分を強調）
+            # 予測確率の増加分を、平均集中時間（ポテンシャル）に掛けて「取り戻せる時間」として算出
             prob_diff = sim_proba - current_proba
-            sim_factor = 0.5 + current_proba + (prob_diff * 1.5)
-            
-            return max(0, int((base_focus_mins * sim_factor) - consumed_mins))
+            gain = int(prob_diff * avg_focus_mins * 1.5) # 効果を体感しやすくするため1.5倍の感度調整
+            return gain
 
         # 関連する「直前の行動（ラグ変数）」も同時に変更し、より確実な分岐の変化を促す
-        sim_walk = simulate_battery({'短時間歩行': 1.0, '短時間歩行_前': 1.0, '1分間歩数': 1000}) - remaining_battery
-        sim_rest = simulate_battery({'休憩判定': 1.0, '休憩判定_前': 1.0, 'time_since_prev_event_min': 30}) - remaining_battery
-        sim_skip = simulate_battery({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)}) - remaining_battery
+        sim_walk = simulate_battery_gain({'短時間歩行': 1.0, '短時間歩行_前': 1.0, '1分間歩数': 1000})
+        sim_rest = simulate_battery_gain({'休憩判定': 1.0, '休憩判定_前': 1.0, 'time_since_prev_event_min': 30})
+        sim_skip = simulate_battery_gain({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)})
 
         sim_col1, sim_col2, sim_col3 = st.columns(3)
         
@@ -387,12 +379,29 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             
             if valid_rules:
                 rule_text, val, samples = valid_rules[0]
-                display_val = val * 100
+                display_prob = val * 100
                 conditions = rule_text.split(" ＋ ")
                 cond_texts = [c.replace("【", "").replace("】", "") for c in conditions]
                 cond_joined = " かつ ".join(cond_texts)
                 
-                st.info(f"🥇 **「{cond_joined}」** のとき、集中確率が最も高まります。\n\n👉 予測スコア: **{display_val:.1f} pt** (過去の該当データ: {samples}件)")
+                # 行動パターンのタイプ分け
+                has_positive_action = any(
+                    ("休憩" in c and ("あり" in c or "高い" in c)) or
+                    ("歩行" in c and ("あり" in c or "高い" in c))
+                    for c in cond_texts
+                )
+                
+                is_overwork = any(
+                    ("予定密度" in c and "高い" in c) or
+                    ("会議" in c and "あり" in c)
+                ) and not has_positive_action
+                
+                if has_positive_action:
+                    st.info(f"💡 **リフレッシュで集中を高める黄金パターン**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{display_prob:.1f} %** まで高まります。\n\n*(過去の実績: {samples}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n素晴らしい傾向です！意図的なリフレッシュ行動（休憩や歩行）が、確実なパフォーマンス向上に繋がっています。引き続きこのパターンを意識しましょう。")
+                elif is_overwork:
+                    st.warning(f"💡 **追い込み型の集中パターン（燃え尽き注意）**\n\n**「{cond_joined}」** のように、予定が詰まっていてリフレッシュがない（席を立たない）切羽詰まった状況で、集中確率が **{display_prob:.1f} %** まで高まる傾向があります。\n\n*(過去の実績: {samples}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n締め切り効果等でスコアは一時的に高まっていますが、この状態を続けると急激な疲労（バッテリー切れ）を招きます。意識的に予定に隙間を作り、短い歩行や休憩を挟むように行動を変えてみましょう。")
+                else:
+                    st.info(f"💡 **あなた専用の「集中モード」発動条件**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{display_prob:.1f} %** まで高まります。\n\n*(過去の実績: {samples}件のデータより算出)*")
 
         st.markdown("---")
         st.markdown("#### 📅 今週の推移")
@@ -426,13 +435,23 @@ if st.session_state.get('run_btn') or (file_ts is not None):
 
             # --- ウィークリー・モメンタルグラフ ---
             st.markdown("##### 🌊 日別のモメンタルグラフ (CVRRの波)")
-            st.caption("※ 上下の面がバランス良く見えるよう、基準値(グレー点線)は「今週の平均値」に合わせて自動調整されています。")
+            st.caption("※ 上下の面がバランス良く見えるよう、基準値(グレー点線)は「今週の平均値」に合わせて自動調整されています。極端に低い値はグラフ下部で省略して表示しています。")
             week_dates = [(week_start + datetime.timedelta(days=i)) for i in range(7)]
             target_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
             
             # 週全体の平均値をベースラインとする（バランス調整のため）
             base_val = week_data['CVRR_SCORE_NEW'].mean() if 'CVRR_SCORE_NEW' in week_data.columns else 50.0
             if pd.isna(base_val): base_val = 50.0
+            
+            # --- Y軸の表示範囲（バランス）の共通設定 ---
+            if not week_data.empty and 'CVRR_SCORE_NEW' in week_data.columns:
+                week_max = week_data['CVRR_SCORE_NEW'].max()
+                amp = week_max - base_val
+                if amp < 10: amp = 10
+                y_max_global = base_val + (amp * 1.2)
+                y_min_global = base_val - (amp * 1.5) # 下側は上側振幅の1.5倍の位置でカット（省略）
+            else:
+                y_max_global, y_min_global = 100, 0
             
             for i in range(0, len(target_dates), 2):
                 cols = st.columns(2)
@@ -454,7 +473,7 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                                 fig_d.add_trace(go.Scatter(x=df_day.index, y=df_day['CVRR_SCORE_NEW'], mode='lines', line=dict(color='#333333', width=2), hovertemplate="%{x|%H:%M}<br>ｽｺｱ: %{y:.1f}<extra></extra>"))
                                 fig_d.update_layout(title=f"{t_date.strftime('%m/%d')} ({dow_str})", height=250, hovermode="x unified", plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
                                 fig_d.update_xaxes(showgrid=True, gridcolor='lightgray')
-                                fig_d.update_yaxes(showgrid=True, gridcolor='lightgray', title="CVRR")
+                                fig_d.update_yaxes(showgrid=True, gridcolor='lightgray', title="CVRR", range=[y_min_global, y_max_global])
                                 st.plotly_chart(fig_d, use_container_width=True)
                             else:
                                 st.markdown(f"**{t_date.strftime('%m/%d')} ({dow_str})**")
@@ -470,7 +489,7 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                     model_llm = genai.GenerativeModel('gemini-2.5-flash')
                     prompt = f"""
                     あなたはプロの生産性コーチです。以下のデータに基づき、ユーザーの今週の働き方を振り返り、来週に向けた「改善アクション」を3つ提案してください。
-                    ・ユーザーの平均集中バッテリー残量基準: {base_focus_mins}分
+                    ・ユーザーの平均集中バッテリー残量基準: {int(avg_focus_mins)}分
                     ・最近の集中スコア平均: {week_data['CVRR_SCORE_NEW'].mean() if not week_data.empty and 'CVRR_SCORE_NEW' in week_data.columns else '不明'}
                     ・現在のコンディション: {'疲労リスクあり' if fatigue_risk else '良好'}
                     出力形式:
