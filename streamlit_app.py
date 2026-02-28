@@ -14,6 +14,7 @@ import google.generativeai as genai
 import shap
 import warnings
 import plotly.graph_objects as go
+import plotly.express as px
 from pathlib import Path
 import matplotlib as mpl
 import matplotlib.font_manager as fm
