@@ -299,8 +299,11 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             delta_sign = "+" if battery_delta >= 0 else ""
             st.markdown(f"""
             <div class="metric-container">
-                <div class="metric-title">🔋 本日の高品質集中 残り</div>
-                <div class="metric-value">{remaining_battery} <span style="font-size: 1.5rem;">分</span></div>
+                <div class="metric-title">🔋 本日の高品質集中</div>
+                <div style="font-size: 1rem; color: #555; margin-bottom: 5px;">
+                    本日ここまで: <strong>{consumed_mins} 分</strong> 消化済
+                </div>
+                <div class="metric-value"><span style="font-size: 1.5rem; color: #6c757d;">残り</span> {remaining_battery} <span style="font-size: 1.5rem;">分</span></div>
                 <div class="metric-sub {delta_color}">あなたの基準値比 {delta_sign}{battery_delta}分</div>
                 <div style="font-size: 0.95rem; color: #6c757d; margin-top: 12px; font-weight: 500;">
                     📉 不調時想定: {rem_p25}分 　〜　 🚀 好調時想定: {rem_p75}分
@@ -331,13 +334,17 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             for k, v in mod_dict.items():
                 if k in sim_data.columns: sim_data[k] = v
             sim_proba = model.predict_proba(sim_data)[0, 1]
-            sim_factor = 0.5 + sim_proba
+            
+            # 効果を体感しやすくするため、変動分の感度を調整（モデルが重視するラグ変数も合わせて変更し、さらに差分を強調）
+            prob_diff = sim_proba - current_proba
+            sim_factor = 0.5 + current_proba + (prob_diff * 1.5)
+            
             return max(0, int((base_focus_mins * sim_factor) - consumed_mins))
 
-        # 事前にシミュレーション結果を計算
-        sim_walk = simulate_battery({'短時間歩行': 1.0, '1分間歩数': 1000}) - remaining_battery
-        sim_rest = simulate_battery({'休憩判定': 1.0, 'time_since_prev_event_min': 30}) - remaining_battery
-        sim_skip = simulate_battery({'is_meeting': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)}) - remaining_battery
+        # 関連する「直前の行動（ラグ変数）」も同時に変更し、より確実な分岐の変化を促す
+        sim_walk = simulate_battery({'短時間歩行': 1.0, '短時間歩行_前': 1.0, '1分間歩数': 1000}) - remaining_battery
+        sim_rest = simulate_battery({'休憩判定': 1.0, '休憩判定_前': 1.0, 'time_since_prev_event_min': 30}) - remaining_battery
+        sim_skip = simulate_battery({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)}) - remaining_battery
 
         sim_col1, sim_col2, sim_col3 = st.columns(3)
         
@@ -354,7 +361,7 @@ if st.session_state.get('run_btn') or (file_ts is not None):
     with tab_weekly:
         st.markdown("## 週末の振り返りと分析 (Weekly Report)")
         
-        # --- マイルールの模式図 ---
+        # --- マイルールの文章化 ---
         st.markdown("#### 💡 AIが見つけた「あなた専用の集中ルール」")
         action_cols = [c for c in ['休憩判定', '短時間歩行', 'is_meeting', 'schedule_density_2h'] if c in df_imp.columns]
         if len(action_cols) > 0 and len(df_imp) > 10:
@@ -382,22 +389,13 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 rule_text, val, samples = valid_rules[0]
                 display_val = val * 100
                 conditions = rule_text.split(" ＋ ")
+                cond_texts = [c.replace("【", "").replace("】", "") for c in conditions]
+                cond_joined = " かつ ".join(cond_texts)
                 
-                html_blocks = "<div style='display:flex; flex-direction:column; align-items:center;'>"
-                for i, cond in enumerate(conditions):
-                    cond_clean = cond.replace("【", "").replace("】", "")
-                    html_blocks += f"<div style='background-color:#f1f8ff; color:#1976d2; padding:15px 30px; border-radius:8px; border:2px solid #bbdefb; font-weight:bold; font-size:1.1rem; width:fit-content; margin-bottom:10px;'>{cond_clean}</div>"
-                    if i < len(conditions) - 1:
-                        html_blocks += "<div style='font-size:1.5rem; color:#888; margin-bottom:10px;'>⬇️ かつ</div>"
-                html_blocks += "<div style='font-size:1.5rem; color:#888; margin-bottom:10px;'>⬇️</div>"
-                html_blocks += f"<div style='background-color:#e6f4ea; color:#1e8e3e; padding:20px 40px; border-radius:8px; border:2px solid #a8dab5; font-weight:900; font-size:1.5rem; width:fit-content;'>🎯 予測スコア: {display_val:.1f} pt</div>"
-                html_blocks += "</div>"
-                
-                st.markdown(html_blocks, unsafe_allow_html=True)
-                st.caption(f"※過去データに基づく最もパフォーマンスが高まる条件の組み合わせです（該当データ: {samples}件）")
+                st.info(f"🥇 **「{cond_joined}」** のとき、集中確率が最も高まります。\n\n👉 予測スコア: **{display_val:.1f} pt** (過去の該当データ: {samples}件)")
 
         st.markdown("---")
-        st.markdown("#### 📅 今週の推移とヒートマップ")
+        st.markdown("#### 📅 今週の推移")
         
         week_start = (current_time - pd.to_timedelta(current_time.dayofweek, unit='d')).date()
         week_data_raw = df_ts_min[df_ts_min.index.date >= week_start].copy()
@@ -420,42 +418,21 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 st.plotly_chart(fig_dow, use_container_width=True)
                 
             with col_w2:
-                target_hours = list(range(time_range[0], time_range[1] + 1))
-                hour_sum = df_w_hourly.groupby('hour')['集中フラグ'].sum().reindex(target_hours, fill_value=0)
-                fig_hour = px.bar(x=[f"{h}:00" for h in target_hours], y=hour_sum.values, labels={'x': '時間帯', 'y': '集中時間 (分)'}, title="時間帯別の集中時間")
+                target_hours_list = list(range(time_range[0], time_range[1] + 1))
+                hour_sum = df_w_hourly.groupby('hour')['集中フラグ'].sum().reindex(target_hours_list, fill_value=0)
+                fig_hour = px.bar(x=[f"{h}:00" for h in target_hours_list], y=hour_sum.values, labels={'x': '時間帯', 'y': '集中時間 (分)'}, title="時間帯別の集中時間")
                 fig_hour.update_traces(marker_color='#1976d2')
                 st.plotly_chart(fig_hour, use_container_width=True)
-                
-            # --- ヒートマップ ---
-            st.markdown("##### 📍 曜日×時間帯 ヒートマップ")
-            col_hm1, col_hm2 = st.columns(2)
-            def plot_weekly_hm(metric_col, colorscale, title):
-                if metric_col not in week_data.columns: return None
-                df_h = week_data[[metric_col]].resample('1H').mean()
-                df_h['hour'] = df_h.index.hour
-                df_h['dow'] = df_h.index.dayofweek
-                pivot = df_h.pivot_table(values=metric_col, index='hour', columns='dow', aggfunc='mean')
-                heatmap_data = np.full((len(target_hours), len(selected_dow_indices)), np.nan)
-                for i, h in enumerate(target_hours):
-                    for j, d in enumerate(selected_dow_indices):
-                        if h in pivot.index and d in pivot.columns:
-                            heatmap_data[i, j] = pivot.loc[h, d]
-                fig = go.Figure(data=go.Heatmap(z=heatmap_data, x=[dow_options[d] for d in selected_dow_indices], y=[f"{h}:00" for h in target_hours], colorscale=colorscale, hoverongaps=False))
-                fig.update_layout(title=title, yaxis_autorange='reversed', height=350, margin=dict(l=20, r=20, t=40, b=20))
-                return fig
-
-            with col_hm1:
-                fig_hm_focus = plot_weekly_hm('集中判定', 'Blues', "集中確率 (青いほど高い)")
-                if fig_hm_focus: st.plotly_chart(fig_hm_focus, use_container_width=True)
-            with col_hm2:
-                if '疲労判定' in week_data.columns:
-                    fig_hm_fat = plot_weekly_hm('疲労判定', 'Reds', "疲労確率 (赤いほど高い)")
-                    if fig_hm_fat: st.plotly_chart(fig_hm_fat, use_container_width=True)
 
             # --- ウィークリー・モメンタルグラフ ---
             st.markdown("##### 🌊 日別のモメンタルグラフ (CVRRの波)")
+            st.caption("※ 上下の面がバランス良く見えるよう、基準値(グレー点線)は「今週の平均値」に合わせて自動調整されています。")
             week_dates = [(week_start + datetime.timedelta(days=i)) for i in range(7)]
             target_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
+            
+            # 週全体の平均値をベースラインとする（バランス調整のため）
+            base_val = week_data['CVRR_SCORE_NEW'].mean() if 'CVRR_SCORE_NEW' in week_data.columns else 50.0
+            if pd.isna(base_val): base_val = 50.0
             
             for i in range(0, len(target_dates), 2):
                 cols = st.columns(2)
@@ -468,11 +445,11 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                             df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
                             if 'CVRR_SCORE_NEW' in df_day.columns and not df_day.empty and not df_day['CVRR_SCORE_NEW'].isna().all():
                                 fig_d = go.Figure()
-                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[50]*len(df_day), mode='lines', line=dict(color='gray', width=1, dash='dash'), hoverinfo='skip'))
-                                y_up = np.where(df_day['CVRR_SCORE_NEW'] >= 50, df_day['CVRR_SCORE_NEW'], 50)
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[base_val]*len(df_day), mode='lines', line=dict(color='gray', width=1, dash='dash'), hoverinfo='skip'))
+                                y_up = np.where(df_day['CVRR_SCORE_NEW'] >= base_val, df_day['CVRR_SCORE_NEW'], base_val)
                                 fig_d.add_trace(go.Scatter(x=df_day.index, y=y_up, fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', mode='lines', line=dict(width=0), hoverinfo='skip'))
-                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[50]*len(df_day), mode='lines', line=dict(width=0), hoverinfo='skip'))
-                                y_down = np.where(df_day['CVRR_SCORE_NEW'] <= 50, df_day['CVRR_SCORE_NEW'], 50)
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[base_val]*len(df_day), mode='lines', line=dict(width=0), hoverinfo='skip'))
+                                y_down = np.where(df_day['CVRR_SCORE_NEW'] <= base_val, df_day['CVRR_SCORE_NEW'], base_val)
                                 fig_d.add_trace(go.Scatter(x=df_day.index, y=y_down, fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', mode='lines', line=dict(width=0), hoverinfo='skip'))
                                 fig_d.add_trace(go.Scatter(x=df_day.index, y=df_day['CVRR_SCORE_NEW'], mode='lines', line=dict(color='#333333', width=2), hovertemplate="%{x|%H:%M}<br>ｽｺｱ: %{y:.1f}<extra></extra>"))
                                 fig_d.update_layout(title=f"{t_date.strftime('%m/%d')} ({dow_str})", height=250, hovermode="x unified", plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
@@ -608,3 +585,33 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             </ul>
         </div>
         """, unsafe_allow_html=True)
+        
+        # --- ヒートマップ (全期間) ---
+        st.markdown("---")
+        st.markdown("##### 📍 曜日×時間帯 ヒートマップ (全期間)")
+        col_hm1, col_hm2 = st.columns(2)
+        def plot_overall_hm(metric_col, colorscale, title):
+            if metric_col not in df_insight.columns: return None
+            df_h = df_insight[[metric_col]].resample('1H').mean()
+            df_h['hour'] = df_h.index.hour
+            df_h['dow'] = df_h.index.dayofweek
+            pivot = df_h.pivot_table(values=metric_col, index='hour', columns='dow', aggfunc='mean')
+            heatmap_data = np.full((len(target_hours_list), len(selected_dow_indices)), np.nan)
+            for i, h in enumerate(target_hours_list):
+                for j, d in enumerate(selected_dow_indices):
+                    if h in pivot.index and d in pivot.columns:
+                        heatmap_data[i, j] = pivot.loc[h, d]
+            fig = go.Figure(data=go.Heatmap(z=heatmap_data, x=[dow_options[d] for d in selected_dow_indices], y=[f"{h}:00" for h in target_hours_list], colorscale=colorscale, hoverongaps=False))
+            fig.update_layout(title=title, yaxis_autorange='reversed', height=350, margin=dict(l=20, r=20, t=40, b=20))
+            return fig
+
+        # ヒートマップ描画用に時間帯リストを定義
+        target_hours_list = list(range(time_range[0], time_range[1] + 1))
+        
+        with col_hm1:
+            fig_hm_focus = plot_overall_hm('集中判定', 'Blues', "集中確率 (青いほど高い)")
+            if fig_hm_focus: st.plotly_chart(fig_hm_focus, use_container_width=True)
+        with col_hm2:
+            if '疲労判定' in df_insight.columns:
+                fig_hm_fat = plot_overall_hm('疲労判定', 'Reds', "疲労確率 (赤いほど高い)")
+                if fig_hm_fat: st.plotly_chart(fig_hm_fat, use_container_width=True)
