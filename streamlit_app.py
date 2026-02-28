@@ -666,8 +666,27 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
             # 設定された時間帯（time_range）でデータをフィルタリング
             df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
             
-            if 'CVRR_SCORE_NEW' in df_day.columns and not df_day.empty:
-                st.markdown("#### モメンタルグラフ (集中の波)")
+            score_col = 'CVRR_SCORE_NEW'
+            graph_title_base = "集中と緩和"
+            score_label = "CVRR SCORE (集中度合い)"
+            state_high = "集中"
+            state_low = "緩和（リラックス）"
+            
+            if target_col in ['疲労判定', '強い疲労判定']:
+                score_col = 'RMSSD_SCORE_NEW'
+                graph_title_base = "疲労と回復"
+                score_label = "RMSSD SCORE (疲労・回復度合い)"
+                state_high = "回復（リラックス）"
+                state_low = "疲労（ストレス）"
+            elif target_col in ['眠気判定', '強い眠気判定']:
+                score_col = 'NEMUKE_SCORE_NEW'
+                graph_title_base = "眠気と覚醒"
+                score_label = "NEMUKE SCORE (眠気度合い)"
+                state_high = "低覚醒（眠気）"
+                state_low = "覚醒"
+            
+            if score_col in df_day.columns and not df_day.empty:
+                st.markdown(f"#### モメンタルグラフ ({graph_title_base}の波)")
                 
                 base_val = 50.0 # 基準となる平均値
                 
@@ -681,7 +700,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 ))
                 
                 # 上側（集中）の青い面
-                y_upper = np.where(df_day['CVRR_SCORE_NEW'] >= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                y_upper = np.where(df_day[score_col] >= base_val, df_day[score_col], base_val)
                 fig_daily.add_trace(go.Scatter(
                     x=df_day.index, y=y_upper,
                     fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', # 青系
@@ -697,7 +716,7 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 ))
                 
                 # 下側（緩和）のオレンジ系の面
-                y_lower = np.where(df_day['CVRR_SCORE_NEW'] <= base_val, df_day['CVRR_SCORE_NEW'], base_val)
+                y_lower = np.where(df_day[score_col] <= base_val, df_day[score_col], base_val)
                 fig_daily.add_trace(go.Scatter(
                     x=df_day.index, y=y_lower,
                     fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', # オレンジ系
@@ -708,17 +727,17 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 # ホバー・表示用の実際の推移線（黒色）
                 fig_daily.add_trace(go.Scatter(
                     x=df_day.index, 
-                    y=df_day['CVRR_SCORE_NEW'],
+                    y=df_day[score_col],
                     mode='lines',
                     line=dict(color='#333333', width=2),
-                    name='CVRR SCORE',
+                    name=score_col,
                     hovertemplate="時刻: %{x|%H:%M}<br>スコア: %{y:.1f}<extra></extra>"
                 ))
                 
                 fig_daily.update_layout(
-                    title=f"{selected_day} の集中と緩和の推移 ({time_range[0]}時〜{time_range[1]}時)",
+                    title=f"{selected_day} の{graph_title_base}の推移 ({time_range[0]}時〜{time_range[1]}時)",
                     xaxis_title="時刻",
-                    yaxis_title="CVRR SCORE (集中度合い)",
+                    yaxis_title=score_label,
                     height=400,
                     hovermode="x unified",
                     plot_bgcolor='rgba(0,0,0,0)',
@@ -729,19 +748,19 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 st.plotly_chart(fig_daily, use_container_width=True)
                 
                 # コメントの生成
-                if not df_day['CVRR_SCORE_NEW'].isna().all():
-                    max_idx = df_day['CVRR_SCORE_NEW'].idxmax()
-                    max_val = df_day['CVRR_SCORE_NEW'].max()
-                    avg_val = df_day['CVRR_SCORE_NEW'].mean()
+                if not df_day[score_col].isna().all():
+                    max_idx = df_day[score_col].idxmax()
+                    max_val = df_day[score_col].max()
+                    avg_val = df_day[score_col].mean()
                     
                     st.info(f"**【{selected_day} のデイリーインサイト】**\n\n"
-                            f"- この日の設定時間帯（{time_range[0]}時〜{time_range[1]}時）における集中（CVRR SCORE）のピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
+                            f"- この日の設定時間帯（{time_range[0]}時〜{time_range[1]}時）におけるスコアのピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
                             f"- 平均スコアは **{avg_val:.1f}** となっています。\n"
-                            f"- グラフにおいて基準値(50)より上側の**青い面**が「集中」している状態、下側の**オレンジの面**が「緩和（リラックス）」している状態を示しています。")
+                            f"- グラフにおいて基準値(50)より上側の**青い面**が「{state_high}」している状態、下側の**オレンジの面**が「{state_low}」している状態を示しています。")
                 else:
                     st.write("この日の有効なスコアデータがありません。")
             else:
-                st.write("対象時間帯のデータがない、または「CVRR_SCORE_NEW」が含まれていないため、モメンタルグラフを表示できません。")
+                st.write(f"対象時間帯のデータがない、または「{score_col}」が含まれていないため、モメンタルグラフを表示できません。")
 
     with tab4:
         st.markdown("#### 行動リターン分析（重回帰分析）")
