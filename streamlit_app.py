@@ -394,6 +394,7 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 is_overwork = any(
                     ("予定密度" in c and "高い" in c) or
                     ("会議" in c and "あり" in c)
+                    for c in cond_texts
                 ) and not has_positive_action
                 
                 if has_positive_action:
