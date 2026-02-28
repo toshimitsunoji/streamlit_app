@@ -655,16 +655,18 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
 
     with tab3:
         df_ts['date_str'] = df_ts.index.date.astype(str)
-        available_days = sorted(df_ts['date_str'].unique().tolist(), reverse=True)
+        # その日が属する週の開始日（月曜日）を計算
+        df_ts['week_start'] = (df_ts.index - pd.to_timedelta(df_ts.index.dayofweek, unit='d')).date.astype(str)
+        available_weeks = sorted(df_ts['week_start'].unique().tolist(), reverse=True)
         
-        if not available_days:
-            st.write("分析可能な日のデータがありません。")
+        if not available_weeks:
+            st.write("分析可能なデータがありません。")
         else:
-            selected_day = st.selectbox("分析対象とする年月日を選択してください", available_days)
-            df_day = df_ts[df_ts['date_str'] == selected_day].copy()
+            week_options = {ws: f"{ws} の週" for ws in available_weeks}
+            selected_week_start = st.selectbox("分析対象とする週を選択してください", available_weeks, format_func=lambda x: week_options[x])
             
-            # 設定された時間帯（time_range）でデータをフィルタリング
-            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+            start_date = pd.to_datetime(selected_week_start)
+            week_dates = [(start_date + pd.Timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
             
             score_col = 'CVRR_SCORE_NEW'
             graph_title_base = "集中と緩和"
@@ -676,8 +678,8 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 score_col = 'RMSSD_SCORE_NEW'
                 graph_title_base = "疲労と回復"
                 score_label = "RMSSD SCORE (疲労・回復度合い)"
-                state_high = "回復（リラックス）"
-                state_low = "疲労（ストレス）"
+                state_high = "疲労（ストレス）"
+                state_low = "回復（リラックス）"
             elif target_col in ['眠気判定', '強い眠気判定']:
                 score_col = 'NEMUKE_SCORE_NEW'
                 graph_title_base = "眠気と覚醒"
@@ -685,82 +687,96 @@ def run_analysis(df_ts, df_sched, use_gemini=False):
                 state_high = "低覚醒（眠気）"
                 state_low = "覚醒"
             
-            if score_col in df_day.columns and not df_day.empty:
-                st.markdown(f"#### モメンタルグラフ ({graph_title_base}の波)")
-                
-                base_val = 50.0 # 基準となる平均値
-                
-                fig_daily = go.Figure()
-                
-                # 基準線(50)を描画（ホバーはスキップ）
-                fig_daily.add_trace(go.Scatter(
-                    x=df_day.index, y=[base_val]*len(df_day),
-                    mode='lines', line=dict(color='gray', width=1, dash='dash'),
-                    name='基準(50)', hoverinfo='skip'
-                ))
-                
-                # 上側（集中）の青い面
-                y_upper = np.where(df_day[score_col] >= base_val, df_day[score_col], base_val)
-                fig_daily.add_trace(go.Scatter(
-                    x=df_day.index, y=y_upper,
-                    fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', # 青系
-                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
-                    showlegend=False, hoverinfo='skip'
-                ))
-                
-                # 下側の面を描くために、ベースラインをもう一度引く
-                fig_daily.add_trace(go.Scatter(
-                    x=df_day.index, y=[base_val]*len(df_day),
-                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
-                    showlegend=False, hoverinfo='skip'
-                ))
-                
-                # 下側（緩和）のオレンジ系の面
-                y_lower = np.where(df_day[score_col] <= base_val, df_day[score_col], base_val)
-                fig_daily.add_trace(go.Scatter(
-                    x=df_day.index, y=y_lower,
-                    fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', # オレンジ系
-                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
-                    showlegend=False, hoverinfo='skip'
-                ))
-                
-                # ホバー・表示用の実際の推移線（黒色）
-                fig_daily.add_trace(go.Scatter(
-                    x=df_day.index, 
-                    y=df_day[score_col],
-                    mode='lines',
-                    line=dict(color='#333333', width=2),
-                    name=score_col,
-                    hovertemplate="時刻: %{x|%H:%M}<br>スコア: %{y:.1f}<extra></extra>"
-                ))
-                
-                fig_daily.update_layout(
-                    title=f"{selected_day} の{graph_title_base}の推移 ({time_range[0]}時〜{time_range[1]}時)",
-                    xaxis_title="時刻",
-                    yaxis_title=score_label,
-                    height=400,
-                    hovermode="x unified",
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    margin=dict(l=20, r=20, t=40, b=20)
-                )
-                fig_daily.update_xaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
-                fig_daily.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
-                st.plotly_chart(fig_daily, use_container_width=True)
-                
-                # コメントの生成
-                if not df_day[score_col].isna().all():
-                    max_idx = df_day[score_col].idxmax()
-                    max_val = df_day[score_col].max()
-                    avg_val = df_day[score_col].mean()
-                    
-                    st.info(f"**【{selected_day} のデイリーインサイト】**\n\n"
-                            f"- この日の設定時間帯（{time_range[0]}時〜{time_range[1]}時）におけるスコアのピークは **{max_idx.strftime('%H:%M')}頃** （スコア: {max_val:.1f}）でした。\n"
-                            f"- 平均スコアは **{avg_val:.1f}** となっています。\n"
-                            f"- グラフにおいて基準値(50)より上側の**青い面**が「{state_high}」している状態、下側の**オレンジの面**が「{state_low}」している状態を示しています。")
-                else:
-                    st.write("この日の有効なスコアデータがありません。")
-            else:
-                st.write(f"対象時間帯のデータがない、または「{score_col}」が含まれていないため、モメンタルグラフを表示できません。")
+            st.markdown(f"#### ウィークリー・モメンタルグラフ ({graph_title_base}の波)")
+            st.write(f"※ {start_date.strftime('%Y年%m月%d日')} からの1週間の推移です。")
+            
+            dow_labels = ["月", "火", "水", "木", "金", "土", "日"]
+            insights = []
+            
+            for i in range(0, 7, 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i + j < 7:
+                        target_day_str = week_dates[i+j]
+                        dow_str = dow_labels[i+j]
+                        with cols[j]:
+                            df_day = df_ts[df_ts['date_str'] == target_day_str].copy()
+                            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+                            
+                            if score_col in df_day.columns and not df_day.empty and not df_day[score_col].isna().all():
+                                base_val = 50.0 # 基準となる平均値
+                                
+                                fig_daily = go.Figure()
+                                
+                                # 基準線(50)を描画（ホバーはスキップ）
+                                fig_daily.add_trace(go.Scatter(
+                                    x=df_day.index, y=[base_val]*len(df_day),
+                                    mode='lines', line=dict(color='gray', width=1, dash='dash'),
+                                    name='基準(50)', hoverinfo='skip'
+                                ))
+                                
+                                # 上側（集中/疲労など）の青い面
+                                y_upper = np.where(df_day[score_col] >= base_val, df_day[score_col], base_val)
+                                fig_daily.add_trace(go.Scatter(
+                                    x=df_day.index, y=y_upper,
+                                    fill='tonexty', fillcolor='rgba(54, 162, 235, 0.5)', # 青系
+                                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                                    showlegend=False, hoverinfo='skip'
+                                ))
+                                
+                                # 下側の面を描くために、ベースラインをもう一度引く
+                                fig_daily.add_trace(go.Scatter(
+                                    x=df_day.index, y=[base_val]*len(df_day),
+                                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                                    showlegend=False, hoverinfo='skip'
+                                ))
+                                
+                                # 下側（緩和/回復など）のオレンジ系の面
+                                y_lower = np.where(df_day[score_col] <= base_val, df_day[score_col], base_val)
+                                fig_daily.add_trace(go.Scatter(
+                                    x=df_day.index, y=y_lower,
+                                    fill='tonexty', fillcolor='rgba(255, 159, 64, 0.5)', # オレンジ系
+                                    mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                                    showlegend=False, hoverinfo='skip'
+                                ))
+                                
+                                # ホバー・表示用の実際の推移線（黒色）
+                                fig_daily.add_trace(go.Scatter(
+                                    x=df_day.index, 
+                                    y=df_day[score_col],
+                                    mode='lines',
+                                    line=dict(color='#333333', width=2),
+                                    name=score_col,
+                                    hovertemplate="時刻: %{x|%H:%M}<br>スコア: %{y:.1f}<extra></extra>"
+                                ))
+                                
+                                fig_daily.update_layout(
+                                    title=f"{target_day_str} ({dow_str})",
+                                    xaxis_title="時刻",
+                                    yaxis_title=score_label,
+                                    height=280,
+                                    hovermode="x unified",
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    margin=dict(l=20, r=20, t=30, b=20)
+                                )
+                                fig_daily.update_xaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
+                                fig_daily.update_yaxes(showgrid=True, gridcolor='lightgray', showline=True, linewidth=1, linecolor='black')
+                                st.plotly_chart(fig_daily, use_container_width=True)
+                                
+                                # コメントの生成
+                                max_idx = df_day[score_col].idxmax()
+                                max_val = df_day[score_col].max()
+                                avg_val = df_day[score_col].mean()
+                                
+                                insights.append(f"- **{dow_str}曜日**: ピーク **{max_idx.strftime('%H:%M')}頃** (スコア: {max_val:.1f}) / 平均 **{avg_val:.1f}**")
+                            else:
+                                st.markdown(f"**{target_day_str} ({dow_str})**")
+                                st.info(f"対象時間帯のデータがない、または「{score_col}」が含まれていないため表示できません。")
+
+            if insights:
+                st.info(f"**【ウィークリーインサイト（{time_range[0]}時〜{time_range[1]}時）】**\n\n"
+                        + "\n".join(insights) + "\n\n"
+                        f"- グラフにおいて基準値(50)より上側の**青い面**が「{state_high}」している状態、下側の**オレンジの面**が「{state_low}」している状態を示しています。")
 
     with tab4:
         st.markdown("#### 行動リターン分析（重回帰分析）")
