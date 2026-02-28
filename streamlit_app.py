@@ -204,13 +204,19 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         current_proba = model.predict_proba(target_data[feature_cols])[0, 1]
         
         # ==========================================
-        # 🔋 Focus Battery & Window ロジック
+        # 🔋 Focus Battery ロジック (確率的表現の追加)
         # ==========================================
         if '集中判定' in df_ts_min.columns:
             daily_focus = df_ts_min['集中判定'].resample('D').apply(lambda x: (x >= 0.5).sum())
-            base_focus_mins = daily_focus.mean() if not daily_focus.empty else 120
+            daily_focus = daily_focus[daily_focus > 0] # 計測がない日は除外
+            if not daily_focus.empty:
+                base_focus_mins = daily_focus.median() # 中央値をベースに
+                focus_p25 = daily_focus.quantile(0.25) # 下振れ（不調時）
+                focus_p75 = daily_focus.quantile(0.75) # 上振れ（好調時）
+            else:
+                base_focus_mins, focus_p25, focus_p75 = 120, 60, 180
         else:
-            base_focus_mins = 120
+            base_focus_mins, focus_p25, focus_p75 = 120, 60, 180
             
         today_str = current_time.strftime('%Y-%m-%d')
         if '集中判定' in df_ts_min.columns and today_str in df_ts_min.index.strftime('%Y-%m-%d'):
@@ -221,8 +227,14 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             
         context_factor = 0.5 + current_proba
         remaining_battery = max(0, int((base_focus_mins * context_factor) - consumed_mins))
+        rem_p25 = max(0, int((focus_p25 * context_factor) - consumed_mins))
+        rem_p75 = max(0, int((focus_p75 * context_factor) - consumed_mins))
+        
         battery_delta = int((base_focus_mins * context_factor) - base_focus_mins)
         
+        # ==========================================
+        # 🕒 Deep Work Window ロジック (AI予測ベースへ進化)
+        # ==========================================
         window_text = "本日は終了モードです"
         window_desc = "しっかり休んで明日に備えましょう。"
         
@@ -232,6 +244,7 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             free_blocks = []
             curr_block_start = start_search
             
+            # まず空きブロックを抽出
             if df_sched is not None and not df_sched.empty:
                 today_sched = df_sched[(df_sched['start_dt'] >= start_search) & (df_sched['start_dt'] < end_search)].sort_values('start_dt')
                 for _, row in today_sched.iterrows():
@@ -247,11 +260,23 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 if next_hour < end_search: free_blocks.append((next_hour, next_hour + pd.Timedelta('90T'), 90))
                     
             if free_blocks:
-                best_block = sorted(free_blocks, key=lambda x: x[2], reverse=True)[0]
+                # 各空きブロックの開始時刻に対してAI予測シミュレーションを実行
+                scored_blocks = []
+                for b_start, b_end, duration in free_blocks:
+                    sim_data = target_data[feature_cols].copy()
+                    if 'hour' in sim_data.columns: sim_data['hour'] = b_start.hour
+                    if 'is_meeting' in sim_data.columns: sim_data['is_meeting'] = 0
+                    if 'has_schedule' in sim_data.columns: sim_data['has_schedule'] = 0
+                    
+                    block_proba = model.predict_proba(sim_data)[0, 1]
+                    scored_blocks.append((b_start, b_end, duration, block_proba))
+                
+                # 最も予測確率が高いブロックを勝負枠に選定
+                best_block = sorted(scored_blocks, key=lambda x: x[3], reverse=True)[0]
                 w_start = best_block[0]
                 w_end = w_start + pd.Timedelta(minutes=min(90, best_block[2]))
                 window_text = f"{w_start.strftime('%H:%M')} – {w_end.strftime('%H:%M')}"
-                window_desc = "この時間に「企画」「設計」「執筆」など最も重いタスクを配置してください。"
+                window_desc = f"AIが本日最も集中しやすい（予測確率 {best_block[3]*100:.1f}%）と判断した空き時間です。"
 
         fatigue_risk = False
         if '疲労判定' in target_data.columns and target_data['疲労判定'].values[0] >= 0.5: fatigue_risk = True
@@ -277,6 +302,9 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 <div class="metric-title">🔋 本日の高品質集中 残り</div>
                 <div class="metric-value">{remaining_battery} <span style="font-size: 1.5rem;">分</span></div>
                 <div class="metric-sub {delta_color}">あなたの基準値比 {delta_sign}{battery_delta}分</div>
+                <div style="font-size: 0.95rem; color: #6c757d; margin-top: 12px; font-weight: 500;">
+                    📉 不調時想定: {rem_p25}分 　〜　 🚀 好調時想定: {rem_p75}分
+                </div>
             </div>
             """, unsafe_allow_html=True)
             
@@ -295,10 +323,8 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             st.success("✨ **コンディション良好**: 現在、集中を阻害する大きなノイズはありません。")
 
         st.markdown("---")
-        st.markdown("### 🔮 アクション・シミュレーター")
-        st.write("「今からどう行動を変えるか」で、未来の集中バッテリーがどう回復するかをAIが即座にシミュレーションします。")
-        
-        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        st.markdown("### 🔮 アクション・シミュレーター (事前予測)")
+        st.write("「今からどう行動を変えれば、どれくらいパフォーマンスが回復するか？」をAIが事前計算しました。")
         
         def simulate_battery(mod_dict):
             sim_data = target_data[feature_cols].copy()
@@ -308,26 +334,19 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             sim_factor = 0.5 + sim_proba
             return max(0, int((base_focus_mins * sim_factor) - consumed_mins))
 
+        # 事前にシミュレーション結果を計算
+        sim_walk = simulate_battery({'短時間歩行': 1.0, '1分間歩数': 1000}) - remaining_battery
+        sim_rest = simulate_battery({'休憩判定': 1.0, 'time_since_prev_event_min': 30}) - remaining_battery
+        sim_skip = simulate_battery({'is_meeting': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)}) - remaining_battery
+
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        
         with sim_col1:
-            if st.button("🚶 今から15分歩く", use_container_width=True):
-                new_batt = simulate_battery({'短時間歩行': 1.0, '1分間歩数': 1000})
-                gain = new_batt - remaining_battery
-                if gain > 0: st.success(f"予測: バッテリーが **+{gain}分** 回復！")
-                else: st.info("予測: 大きな回復効果は見込めません。")
-                
+            st.info(f"**🚶 今から15分歩く**\n\n予測: バッテリー **{'+' + str(sim_walk) if sim_walk > 0 else sim_walk} 分**")
         with sim_col2:
-            if st.button("☕ 予定の前に休憩をとる", use_container_width=True):
-                new_batt = simulate_battery({'休憩判定': 1.0, 'time_since_prev_event_min': 30})
-                gain = new_batt - remaining_battery
-                if gain > 0: st.success(f"予測: バッテリーが **+{gain}分** 回復！")
-                else: st.info("予測: 大きな回復効果は見込めません。")
-                
+            st.info(f"**☕ 予定の前に休憩をとる**\n\n予測: バッテリー **{'+' + str(sim_rest) if sim_rest > 0 else sim_rest} 分**")
         with sim_col3:
-            if st.button("🚫 直近の会議を1つスキップ", use_container_width=True):
-                new_batt = simulate_battery({'is_meeting': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)})
-                gain = new_batt - remaining_battery
-                if gain > 0: st.success(f"予測: バッテリーが **+{gain}分** 節約！")
-                else: st.info("予測: 大きな節約効果は見込めません。")
+            st.info(f"**🚫 直近の会議を1つ減らす**\n\n予測: バッテリー **{'+' + str(sim_skip) if sim_skip > 0 else sim_skip} 分**")
 
     # ==========================================
     # Tab 2: Weekly Report
