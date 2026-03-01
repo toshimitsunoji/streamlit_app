@@ -405,25 +405,22 @@ if run_btn or file_ts is not None:
 
         st.markdown("---")
         st.markdown("### 🛠 波をコントロールするアクション・シミュレーション")
-        # シミュレーション：波への影響を提示
-        sim_meeting_gain = int(30 * (metrics['dw_rate'] / 100))
-        sim_rest_gain = int(metrics['avg_dw_duration'] * 0.2)
         
         sim_c1, sim_c2 = st.columns(2)
         with sim_c1:
-            st.markdown(f"""
+            st.markdown("""
             <div class="sim-box">
                 <h4>🚫 会議を30分短縮・ブロック化する</h4>
                 <p style="color:#555;">波が分断されるのを防ぐことで、過去の成功率から換算して、<br>
-                今日のDeep Work総量が <strong style="color:#10b981; font-size:1.3rem;">+{sim_meeting_gain} 分</strong> 増加します。</p>
+                今日のDeep Work総量が <strong style="color:#10b981; font-size:1.2rem;">増加します</strong>。</p>
             </div>
             """, unsafe_allow_html=True)
         with sim_c2:
-            st.markdown(f"""
+            st.markdown("""
             <div class="sim-box">
                 <h4>☕ 今から15分、完全な休憩をとる</h4>
                 <p style="color:#555;">波の振幅（強さ）を回復させることで、次の高集中波の持続時間が<br>
-                通常より <strong style="color:#10b981; font-size:1.3rem;">+{sim_rest_gain} 分</strong> 延長される見込みです。</p>
+                通常より <strong style="color:#10b981; font-size:1.2rem;">延長される見込み</strong> です。</p>
             </div>
             """, unsafe_allow_html=True)
 
