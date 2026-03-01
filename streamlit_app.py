@@ -224,12 +224,12 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         else:
             consumed_mins = 0
             
-        # 確率による変動を外し、純粋に「全体のポテンシャル - 消化済」で計算（時間経過で不自然に増えないようにする）
+        # 確率による変動を外し、純粋に「全体のポテンシャル - 消化済」で計算
         rem_avg = max(0, int(avg_focus_mins - consumed_mins))
         rem_p80 = max(0, int(focus_p80 - consumed_mins))
         
         # ==========================================
-        # 🕒 Deep Work Window ロジック (AI予測ベースへ進化)
+        # 🕒 Deep Work Window ロジック
         # ==========================================
         window_text = "本日は終了モードです"
         window_desc = "しっかり休んで明日に備えましょう。"
@@ -240,7 +240,6 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             free_blocks = []
             curr_block_start = start_search
             
-            # まず空きブロックを抽出
             if df_sched is not None and not df_sched.empty:
                 today_sched = df_sched[(df_sched['start_dt'] >= start_search) & (df_sched['start_dt'] < end_search)].sort_values('start_dt')
                 for _, row in today_sched.iterrows():
@@ -256,7 +255,6 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                 if next_hour < end_search: free_blocks.append((next_hour, next_hour + pd.Timedelta('90T'), 90))
                     
             if free_blocks:
-                # 各空きブロックの開始時刻に対してAI予測シミュレーションを実行
                 scored_blocks = []
                 for b_start, b_end, duration in free_blocks:
                     sim_data = target_data[feature_cols].copy()
@@ -267,7 +265,6 @@ if st.session_state.get('run_btn') or (file_ts is not None):
                     block_proba = model.predict_proba(sim_data)[0, 1]
                     scored_blocks.append((b_start, b_end, duration, block_proba))
                 
-                # 最も予測確率が高いブロックを勝負枠に選定
                 best_block = sorted(scored_blocks, key=lambda x: x[3], reverse=True)[0]
                 w_start = best_block[0]
                 w_end = w_start + pd.Timedelta(minutes=min(90, best_block[2]))
@@ -327,13 +324,10 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             for k, v in mod_dict.items():
                 if k in sim_data.columns: sim_data[k] = v
             sim_proba = model.predict_proba(sim_data)[0, 1]
-            
-            # 予測確率の増加分を、平均集中時間（ポテンシャル）に掛けて「取り戻せる時間」として算出
             prob_diff = sim_proba - current_proba
-            gain = int(prob_diff * avg_focus_mins * 1.5) # 効果を体感しやすくするため1.5倍の感度調整
+            gain = int(prob_diff * avg_focus_mins * 1.5)
             return gain
 
-        # 関連する「直前の行動（ラグ変数）」も同時に変更し、より確実な分岐の変化を促す
         sim_walk = simulate_battery_gain({'短時間歩行': 1.0, '短時間歩行_前': 1.0, '1分間歩数': 1000})
         sim_rest = simulate_battery_gain({'休憩判定': 1.0, '休憩判定_前': 1.0, 'time_since_prev_event_min': 30})
         sim_skip = simulate_battery_gain({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)})
@@ -377,32 +371,49 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             if not valid_rules: valid_rules = tree_rules
             valid_rules.sort(key=lambda x: x[1], reverse=True)
             
-            if valid_rules:
-                rule_text, val, samples = valid_rules[0]
+            # 良いパターンと危険なパターンの両方を抽出
+            positive_rule = None
+            overwork_rule = None
+            
+            for rule_text, val, samples in valid_rules:
                 display_prob = val * 100
                 conditions = rule_text.split(" ＋ ")
                 cond_texts = [c.replace("【", "").replace("】", "") for c in conditions]
-                cond_joined = " かつ ".join(cond_texts)
                 
-                # 行動パターンのタイプ分け
                 has_positive_action = any(
                     ("休憩" in c and ("あり" in c or "高い" in c)) or
                     ("歩行" in c and ("あり" in c or "高い" in c))
                     for c in cond_texts
                 )
-                
                 is_overwork = any(
                     ("予定密度" in c and "高い" in c) or
                     ("会議" in c and "あり" in c)
                     for c in cond_texts
                 ) and not has_positive_action
                 
-                if has_positive_action:
-                    st.info(f"💡 **リフレッシュで集中を高める黄金パターン**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{display_prob:.1f} %** まで高まります。\n\n*(過去の実績: {samples}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n素晴らしい傾向です！意図的なリフレッシュ行動（休憩や歩行）が、確実なパフォーマンス向上に繋がっています。引き続きこのパターンを意識しましょう。")
-                elif is_overwork:
-                    st.warning(f"💡 **追い込み型の集中パターン（燃え尽き注意）**\n\n**「{cond_joined}」** のように、予定が詰まっていてリフレッシュがない（席を立たない）切羽詰まった状況で、集中確率が **{display_prob:.1f} %** まで高まる傾向があります。\n\n*(過去の実績: {samples}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n締め切り効果等でスコアは一時的に高まっていますが、この状態を続けると急激な疲労（バッテリー切れ）を招きます。意識的に予定に隙間を作り、短い歩行や休憩を挟むように行動を変えてみましょう。")
-                else:
-                    st.info(f"💡 **あなた専用の「集中モード」発動条件**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{display_prob:.1f} %** まで高まります。\n\n*(過去の実績: {samples}件のデータより算出)*")
+                if has_positive_action and not positive_rule:
+                    positive_rule = (cond_texts, display_prob, samples)
+                if is_overwork and not overwork_rule:
+                    overwork_rule = (cond_texts, display_prob, samples)
+                    
+                if positive_rule and overwork_rule:
+                    break
+                    
+            if positive_rule:
+                cond_joined = " かつ ".join(positive_rule[0])
+                st.info(f"💡 **リフレッシュで集中を高める黄金パターン**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{positive_rule[1]:.1f} %** まで高まります。\n\n*(過去の実績: {positive_rule[2]}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n素晴らしい傾向です！意図的なリフレッシュ行動（休憩や歩行）が、確実なパフォーマンス向上に繋がっています。引き続きこのパターンを意識しましょう。")
+                
+            if overwork_rule:
+                cond_joined = " かつ ".join(overwork_rule[0])
+                st.warning(f"💡 **追い込み型の集中パターン（燃え尽き注意）**\n\n**「{cond_joined}」** のように、予定が詰まっていてリフレッシュがない切羽詰まった状況で、集中確率が **{overwork_rule[1]:.1f} %** まで高まる傾向があります。\n\n*(過去の実績: {overwork_rule[2]}件のデータより算出)*\n\n👉 **コーチからのアドバイス:**\n締め切り効果等でスコアは一時的に高まっていますが、この状態を続けると急激な疲労（バッテリー切れ）を招きます。意識的に予定に隙間を作り、短い歩行や休憩を挟むように行動を変えてみましょう。")
+                
+            if not positive_rule and not overwork_rule and valid_rules:
+                rule_text, val, samples = valid_rules[0]
+                display_prob = val * 100
+                conditions = rule_text.split(" ＋ ")
+                cond_texts = [c.replace("【", "").replace("】", "") for c in conditions]
+                cond_joined = " かつ ".join(cond_texts)
+                st.info(f"💡 **あなた専用の「集中モード」発動条件**\n\n**「{cond_joined}」** の状況が整ったとき、あなたが集中状態に入る確率は **{display_prob:.1f} %** まで高まります。\n\n*(過去の実績: {samples}件のデータより算出)*")
 
         st.markdown("---")
         st.markdown("#### 📅 今週の推移")
@@ -440,17 +451,15 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             week_dates = [(week_start + datetime.timedelta(days=i)) for i in range(7)]
             target_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
             
-            # 週全体の平均値をベースラインとする（バランス調整のため）
             base_val = week_data['CVRR_SCORE_NEW'].mean() if 'CVRR_SCORE_NEW' in week_data.columns else 50.0
             if pd.isna(base_val): base_val = 50.0
             
-            # --- Y軸の表示範囲（バランス）の共通設定 ---
             if not week_data.empty and 'CVRR_SCORE_NEW' in week_data.columns:
                 week_max = week_data['CVRR_SCORE_NEW'].max()
                 amp = week_max - base_val
                 if amp < 10: amp = 10
                 y_max_global = base_val + (amp * 1.2)
-                y_min_global = base_val - (amp * 1.5) # 下側は上側振幅の1.5倍の位置でカット（省略）
+                y_min_global = base_val - (amp * 1.5)
             else:
                 y_max_global, y_min_global = 100, 0
             
@@ -512,6 +521,64 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         df_insight = df_imp.copy()
         df_insight = df_insight[df_insight.index.dayofweek.isin(selected_dow_indices)]
         df_insight = df_insight[(df_insight.index.hour >= time_range[0]) & (df_insight.index.hour <= time_range[1])]
+
+        target_hours_list = list(range(time_range[0], time_range[1] + 1))
+
+        # --- 全期間の特性データ算出 (タイプ診断用) ---
+        focus_type_name = "データ不足"
+        focus_type_desc = "特徴を判定するためのデータが足りません。"
+        hour_avg = pd.Series(dtype=float)
+        dow_avg = pd.Series(dtype=float)
+
+        if '集中判定' in df_insight.columns:
+            df_ins_1t = df_insight[['集中判定']].resample('1T').mean().ffill(limit=5)
+            df_ins_1t['集中フラグ'] = (df_ins_1t['集中判定'] >= 0.5).astype(int)
+            
+            df_ins_hourly = df_ins_1t.resample('1H').sum()
+            df_ins_hourly['date'] = df_ins_hourly.index.date
+            df_ins_hourly['hour'] = df_ins_hourly.index.hour
+            df_ins_hourly['dow'] = df_ins_hourly.index.dayofweek
+            
+            df_ins_hourly = df_ins_hourly[df_ins_hourly['dow'].isin(selected_dow_indices)]
+            df_ins_hourly = df_ins_hourly[(df_ins_hourly['hour'] >= time_range[0]) & (df_ins_hourly['hour'] <= time_range[1])]
+            
+            total_days = df_ins_hourly['date'].nunique()
+            if total_days > 0:
+                hour_total = df_ins_hourly.groupby('hour')['集中フラグ'].sum()
+                hour_avg = (hour_total / total_days).reindex(target_hours_list, fill_value=0)
+                
+                dow_total = df_ins_hourly.groupby('dow')['集中フラグ'].sum()
+                days_per_dow = df_ins_hourly.groupby('dow')['date'].nunique()
+                dow_avg = (dow_total / days_per_dow).reindex(selected_dow_indices, fill_value=0)
+                
+                am_hours = [h for h in target_hours_list if h < 12]
+                pm1_hours = [h for h in target_hours_list if 12 <= h < 16]
+                pm2_hours = [h for h in target_hours_list if 16 <= h]
+                
+                am_avg = hour_avg.loc[am_hours].mean() if am_hours else 0
+                pm1_avg = hour_avg.loc[pm1_hours].mean() if pm1_hours else 0
+                pm2_avg = hour_avg.loc[pm2_hours].mean() if pm2_hours else 0
+                
+                max_period = max(am_avg, pm1_avg, pm2_avg)
+                if max_period > 0:
+                    if max_period == am_avg:
+                        focus_type_name = "🌅 午前集中型 (Morning Sprinter)"
+                        focus_type_desc = "午前中に最も高いパフォーマンスを発揮します。重いタスクは昼までに片付けるのがベストです。"
+                    elif max_period == pm1_avg:
+                        focus_type_name = "☀️ 午後スタート型 (Afternoon Engine)"
+                        focus_type_desc = "昼食後から夕方にかけてエンジンがかかるタイプです。午後に勝負タスクを配置しましょう。"
+                    else:
+                        focus_type_name = "🌆 夕方追い込み型 (Evening Closer)"
+                        focus_type_desc = "夕方以降に集中力が高まるタイプです。終業前の追い込みが得意ですが、オーバーワークに注意が必要です。"
+                        
+                    mean_val = hour_avg.mean()
+                    cv = hour_avg.std() / mean_val if mean_val > 0 else 0
+                    if cv > 0.4:
+                        focus_type_name += " / 🌊 波型スプリンター"
+                        focus_type_desc += " 集中する時間としない時間のメリハリが非常に強いため、波に乗れる時間を逃さないことが重要です。"
+                    else:
+                        focus_type_name += " / 🐢 安定持続型"
+                        focus_type_desc += " 1日を通して安定して集中を保つことができます。こまめな休憩でスタミナを維持しましょう。"
 
         if '集中判定' in df_insight.columns: df_insight['focus_start'] = (df_insight['集中判定'] >= 0.5) & (df_insight['集中判定'].shift(1) < 0.5)
         if '疲労判定' in df_insight.columns: df_insight['fatigue_start'] = (df_insight['疲労判定'] >= 0.5) & (df_insight['疲労判定'].shift(1) < 0.5)
@@ -587,7 +654,9 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 5px solid #28a745; margin-bottom: 20px;">
             <h4 style="margin-top: 0; color: #333;">🎯 あなたの集中特性</h4>
             <ul style="font-size: 1.1rem; color: #555;">
-                <li><strong>{f_dow}曜日の{f_hour}時台</strong> に最も集中しやすい傾向があります。</li>
+                <li><strong>集中タイプ： <span style="color:#28a745;">{focus_type_name}</span></strong><br>
+                    <span style="font-size: 0.95rem; color: #777;">{focus_type_desc}</span></li>
+                <li style="margin-top: 10px;"><strong>{f_dow}曜日の{f_hour}時台</strong> に最も集中しやすい傾向があります。</li>
                 <li>平均集中持続時間は <strong>{avg_focus_duration_str}分</strong> です。</li>
                 <li>1日の平均集中時間は <strong>{daily_total_focus_time_str}分</strong> です。</li>
                 <li>1日に平均 <strong>{daily_focus_count_str}回</strong> の集中サイクルを繰り返しています。</li>
@@ -606,8 +675,24 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         </div>
         """, unsafe_allow_html=True)
         
-        # --- ヒートマップ (全期間) ---
+        # --- 全期間の棒グラフ ---
         st.markdown("---")
+        st.markdown("#### 📊 全期間の集中傾向 (曜日・時間帯別)")
+        
+        if not hour_avg.empty and not dow_avg.empty:
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                fig_dow_all = px.bar(x=[dow_options[i] for i in selected_dow_indices], y=dow_avg.values, labels={'x': '曜日', 'y': '1日平均 集中時間 (分)'}, title="曜日別の平均集中時間")
+                fig_dow_all.update_traces(marker_color='#28a745')
+                st.plotly_chart(fig_dow_all, use_container_width=True)
+            with col_s2:
+                fig_hour_all = px.bar(x=[f"{h}:00" for h in target_hours_list], y=hour_avg.values, labels={'x': '時間帯', 'y': '1日平均 集中時間 (分)'}, title="時間帯別の平均集中時間")
+                fig_hour_all.update_traces(marker_color='#28a745')
+                st.plotly_chart(fig_hour_all, use_container_width=True)
+        else:
+            st.info("データを表示するための十分な記録がありません。")
+
+        # --- ヒートマップ (全期間) ---
         st.markdown("##### 📍 曜日×時間帯 ヒートマップ (全期間)")
         col_hm1, col_hm2 = st.columns(2)
         def plot_overall_hm(metric_col, colorscale, title):
@@ -624,9 +709,6 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             fig = go.Figure(data=go.Heatmap(z=heatmap_data, x=[dow_options[d] for d in selected_dow_indices], y=[f"{h}:00" for h in target_hours_list], colorscale=colorscale, hoverongaps=False))
             fig.update_layout(title=title, yaxis_autorange='reversed', height=350, margin=dict(l=20, r=20, t=40, b=20))
             return fig
-
-        # ヒートマップ描画用に時間帯リストを定義
-        target_hours_list = list(range(time_range[0], time_range[1] + 1))
         
         with col_hm1:
             fig_hm_focus = plot_overall_hm('集中判定', 'Blues', "集中確率 (青いほど高い)")
