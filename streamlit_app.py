@@ -155,6 +155,11 @@ def compute_personal_metrics(df_feat, freq_td, current_time):
     metrics['avg_wave_amplitude'] = df_feat['wave_amplitude'][df_feat['wave_amplitude'] > 0].mean()
     if pd.isna(metrics['avg_wave_amplitude']): metrics['avg_wave_amplitude'] = 10.0
     
+    # 全期間のDeep Work成功率 (dw_rate) の追加
+    total_blank_steps = (df_feat['has_schedule'] == 0).sum()
+    total_dw_steps = df_feat['deep_work'].sum()
+    metrics['dw_rate'] = (total_dw_steps / total_blank_steps * 100) if total_blank_steps > 0 else 0
+    
     # 目標算出
     past_28_days = current_time.date() - pd.Timedelta(days=28)
     df_past = df_feat[(df_feat['date'] >= past_28_days) & (df_feat['date'] < current_time.date())]
