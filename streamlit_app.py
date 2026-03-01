@@ -330,7 +330,10 @@ if st.session_state.get('run_btn') or (file_ts is not None):
 
         sim_walk = simulate_battery_gain({'短時間歩行': 1.0, '短時間歩行_前': 1.0, '1分間歩数': 1000})
         sim_rest = simulate_battery_gain({'休憩判定': 1.0, '休憩判定_前': 1.0, 'time_since_prev_event_min': 30})
-        sim_skip = simulate_battery_gain({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, target_data['schedule_density_2h'].values[0] - 0.25)})
+        
+        # 予定表データがない（schedule_density_2hが存在しない）場合のエラーを回避
+        current_density = target_data['schedule_density_2h'].values[0] if 'schedule_density_2h' in target_data.columns else 0.0
+        sim_skip = simulate_battery_gain({'is_meeting': 0.0, 'has_schedule': 0.0, 'schedule_density_2h': max(0, current_density - 0.25)})
 
         sim_col1, sim_col2, sim_col3 = st.columns(3)
         
