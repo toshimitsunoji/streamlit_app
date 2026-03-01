@@ -155,7 +155,7 @@ def compute_personal_metrics(df_feat, freq_td, current_time):
     metrics['avg_wave_amplitude'] = df_feat['wave_amplitude'][df_feat['wave_amplitude'] > 0].mean()
     if pd.isna(metrics['avg_wave_amplitude']): metrics['avg_wave_amplitude'] = 10.0
     
-    # 全期間のDeep Work成功率 (dw_rate) の追加
+    # 全期間のDeep Work成功率 (dw_rate)
     total_blank_steps = (df_feat['has_schedule'] == 0).sum()
     total_dw_steps = df_feat['deep_work'].sum()
     metrics['dw_rate'] = (total_dw_steps / total_blank_steps * 100) if total_blank_steps > 0 else 0
@@ -242,6 +242,7 @@ with st.sidebar:
         RESAMPLE_FREQ = st.selectbox("分析単位 (波解像度)", ['1T', '5T', '10T', '30T'], index=1)
         PREDICT_AHEAD_MINS = st.selectbox("予測先 (分)", [30, 60], index=0)
         TARGET_DATETIME_STR = st.text_input("予測基準日時 (空欄で最新)")
+        time_range = st.slider("グラフ表示時間帯", 0, 23, (9, 19)) # 表示範囲のコントロールを追加
         
     st.markdown("---")
     run_btn = st.button("🚀 波のダイナミクスを解析", type="primary", use_container_width=True)
@@ -450,6 +451,59 @@ if run_btn or file_ts is not None:
             fig_w = px.bar(x=daily_sum.index, y=daily_sum.values, labels={'x':'日付', 'y':'Deep Work時間 (分)'}, title="日別 Deep Work推移")
             fig_w.update_traces(marker_color='#3b82f6')
             st.plotly_chart(fig_w, use_container_width=True)
+
+        # --- 波形グラフ (モメンタルグラフ) の復活・進化版 ---
+        st.markdown("---")
+        st.markdown("#### 🌊 今週の集中波形 (モメンタルグラフ)")
+        st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン（Deep Workの候補）」です。波の周期性（リズム）が視覚的に確認できます。")
+        
+        week_dates = df_this_week['date'].unique()
+        if len(week_dates) > 0:
+            for i in range(0, len(week_dates), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i + j < len(week_dates):
+                        t_date = week_dates[i+j]
+                        with cols[j]:
+                            df_day = df_this_week[df_this_week['date'] == t_date].copy()
+                            # サイドバーで設定した時間帯でフィルタ
+                            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+                            
+                            if not df_day.empty and not df_day['focus_smooth'].isna().all():
+                                fig_d = go.Figure()
+                                
+                                # 基準線 (高集中ライン: 上位30%の閾値)
+                                q70_val = q70_thresh 
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[q70_val]*len(df_day), mode='lines', line=dict(color='gray', width=1, dash='dash'), name='高集中ライン', hoverinfo='skip'))
+                                
+                                # 閾値より上の部分を青く塗りつぶし (Deep Work ゾーン)
+                                y_up = np.where(df_day['focus_smooth'] >= q70_val, df_day['focus_smooth'], q70_val)
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=y_up, fill='tonexty', fillcolor='rgba(59, 130, 246, 0.3)', mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+                                # 下側を透明にするためのダミートレース
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[q70_val]*len(df_day), fill='tonexty', fillcolor='rgba(0,0,0,0)', mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+                                
+                                # 波の線 (メイン)
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=df_day['focus_smooth'], mode='lines', line=dict(color='#3b82f6', width=2), name='集中波', hovertemplate="%{x|%H:%M}<br>強度: %{y:.1f}<extra></extra>"))
+                                
+                                # ピークのポイント (赤い点)
+                                peaks_day = df_day[df_day['is_peak'] == 1]
+                                if not peaks_day.empty:
+                                    fig_d.add_trace(go.Scatter(x=peaks_day.index, y=peaks_day['focus_smooth'], mode='markers', marker=dict(color='#ef4444', size=6, symbol='circle'), name='ピーク', hovertemplate="%{x|%H:%M}<br>ピーク<extra></extra>"))
+                                
+                                dow_str = ['月','火','水','木','金','土','日'][t_date.weekday()]
+                                fig_d.update_layout(title=f"{t_date.strftime('%m/%d')} ({dow_str})", height=250, hovermode="x unified", plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
+                                fig_d.update_xaxes(showgrid=True, gridcolor='lightgray')
+                                
+                                # Y軸の範囲を適度に調整
+                                y_min = df_day['focus_smooth'].min()
+                                y_max = df_day['focus_smooth'].max()
+                                amp = y_max - y_min if y_max - y_min > 0 else 10
+                                fig_d.update_yaxes(showgrid=True, gridcolor='lightgray', title="集中強度", range=[max(0, y_min - amp*0.2), y_max + amp*0.2])
+                                
+                                st.plotly_chart(fig_d, use_container_width=True)
+                            else:
+                                st.markdown(f"**{t_date.strftime('%m/%d')} ({['月','火','水','木','金','土','日'][t_date.weekday()]})**")
+                                st.info("指定された時間帯のデータがありません。")
 
     # --- TAB 3: My Spec ---
     with tab_spec:
