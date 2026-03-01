@@ -529,6 +529,8 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         focus_type_desc = "特徴を判定するためのデータが足りません。"
         hour_avg = pd.Series(dtype=float)
         dow_avg = pd.Series(dtype=float)
+        hour_total = pd.Series(dtype=float)
+        dow_total = pd.Series(dtype=float)
 
         if '集中判定' in df_insight.columns:
             df_ins_1t = df_insight[['集中判定']].resample('1T').mean().ffill(limit=5)
@@ -544,12 +546,14 @@ if st.session_state.get('run_btn') or (file_ts is not None):
             
             total_days = df_ins_hourly['date'].nunique()
             if total_days > 0:
-                hour_total = df_ins_hourly.groupby('hour')['集中フラグ'].sum()
-                hour_avg = (hour_total / total_days).reindex(target_hours_list, fill_value=0)
+                hour_total_raw = df_ins_hourly.groupby('hour')['集中フラグ'].sum()
+                hour_total = hour_total_raw.reindex(target_hours_list, fill_value=0)
+                hour_avg = hour_total / total_days
                 
-                dow_total = df_ins_hourly.groupby('dow')['集中フラグ'].sum()
+                dow_total_raw = df_ins_hourly.groupby('dow')['集中フラグ'].sum()
+                dow_total = dow_total_raw.reindex(selected_dow_indices, fill_value=0)
                 days_per_dow = df_ins_hourly.groupby('dow')['date'].nunique()
-                dow_avg = (dow_total / days_per_dow).reindex(selected_dow_indices, fill_value=0)
+                dow_avg = (dow_total_raw / days_per_dow).reindex(selected_dow_indices, fill_value=0)
                 
                 am_hours = [h for h in target_hours_list if h < 12]
                 pm1_hours = [h for h in target_hours_list if 12 <= h < 16]
@@ -679,15 +683,15 @@ if st.session_state.get('run_btn') or (file_ts is not None):
         st.markdown("---")
         st.markdown("#### 📊 全期間の集中傾向 (曜日・時間帯別)")
         
-        if not hour_avg.empty and not dow_avg.empty:
+        if not hour_total.empty and not dow_total.empty:
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                fig_dow_all = px.bar(x=[dow_options[i] for i in selected_dow_indices], y=dow_avg.values, labels={'x': '曜日', 'y': '1日平均 集中時間 (分)'}, title="曜日別の平均集中時間")
-                fig_dow_all.update_traces(marker_color='#28a745')
+                fig_dow_all = px.bar(x=[dow_options[i] for i in selected_dow_indices], y=dow_total.values, labels={'x': '曜日', 'y': '合計集中時間 (分)'}, title="曜日別の合計集中時間")
+                fig_dow_all.update_traces(marker_color='#1976d2')
                 st.plotly_chart(fig_dow_all, use_container_width=True)
             with col_s2:
-                fig_hour_all = px.bar(x=[f"{h}:00" for h in target_hours_list], y=hour_avg.values, labels={'x': '時間帯', 'y': '1日平均 集中時間 (分)'}, title="時間帯別の平均集中時間")
-                fig_hour_all.update_traces(marker_color='#28a745')
+                fig_hour_all = px.bar(x=[f"{h}:00" for h in target_hours_list], y=hour_total.values, labels={'x': '時間帯', 'y': '合計集中時間 (分)'}, title="時間帯別の合計集中時間")
+                fig_hour_all.update_traces(marker_color='#1976d2')
                 st.plotly_chart(fig_hour_all, use_container_width=True)
         else:
             st.info("データを表示するための十分な記録がありません。")
