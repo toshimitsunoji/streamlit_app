@@ -440,14 +440,90 @@ if run_btn or file_ts is not None:
         
         st.metric("今週のDeep Work合計時間", f"{int(tw_dw)} 分", f"{'+' if diff_dw>=0 else ''}{int(diff_dw)} 分 (先週比)")
         
+        # --- 黄金パターンの動的抽出（最大3つ） ---
         st.markdown("#### 💡 データが見つけた黄金パターン")
-        st.info("📊 **「午前中に会議を寄せて、午後にまとまった空白を作った日」** は、波が途切れずDeep Work時間が平均の **1.4倍** になる傾向があります。(※過去データからの抽出例)")
-
-        if not df_this_week.empty:
-            daily_sum = df_this_week.groupby('date')['deep_work'].sum() * (freq_td.total_seconds() / 60)
-            fig_w = px.bar(x=daily_sum.index, y=daily_sum.values, labels={'x':'日付', 'y':'Deep Work時間 (分)'}, title="日別 Deep Work推移")
-            fig_w.update_traces(marker_color='#3b82f6')
-            st.plotly_chart(fig_w, use_container_width=True)
+        
+        # 過去データ全体（平日）からパターンを探索
+        df_feat_wd = df_feat[df_feat['dayofweek'] < 5].copy()
+        if not df_feat_wd.empty and df_feat_wd['date'].nunique() >= 3:
+            daily_stats = []
+            for d, group in df_feat_wd.groupby('date'):
+                am_group = group[group.index.hour < 12]
+                pm_group = group[group.index.hour >= 12]
+                
+                dw_mins = group['deep_work'].sum() * (freq_td.total_seconds() / 60)
+                am_dw_mins = am_group['deep_work'].sum() * (freq_td.total_seconds() / 60)
+                am_meeting = am_group['is_meeting'].sum() * (freq_td.total_seconds() / 60)
+                pm_blank = (pm_group['has_schedule'] == 0).sum() * (freq_td.total_seconds() / 60)
+                steps = group['1分間歩数'].sum() if '1分間歩数' in group.columns else 0
+                
+                # 最長空白ブロック
+                blank_mask = group['has_schedule'] == 0
+                blank_blocks = blank_mask.groupby((blank_mask != blank_mask.shift()).cumsum()).sum()
+                longest_blank = blank_blocks.max() * (freq_td.total_seconds() / 60) if not blank_blocks.empty else 0
+                
+                daily_stats.append({
+                    'date': d,
+                    'dw_mins': dw_mins,
+                    'am_dw_mins': am_dw_mins,
+                    'am_meeting': am_meeting,
+                    'pm_blank': pm_blank,
+                    'steps': steps,
+                    'longest_blank': longest_blank
+                })
+                
+            df_daily = pd.DataFrame(daily_stats)
+            avg_dw_all = df_daily['dw_mins'].mean()
+            
+            if avg_dw_all > 0:
+                patterns = []
+                
+                # パターン1: 午前に会議集中、午後空白
+                m_am = df_daily['am_meeting'].median()
+                m_pm = df_daily['pm_blank'].median()
+                mask1 = (df_daily['am_meeting'] >= m_am) & (df_daily['pm_blank'] >= m_pm) & (df_daily['am_meeting'] > 0)
+                if mask1.sum() >= 1 and (~mask1).sum() >= 1:
+                    avg_dw = df_daily[mask1]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "午前中に会議を寄せて、午後にまとまった空白を作った日"))
+                        
+                # パターン2: 身体活動
+                if df_daily['steps'].max() > 0:
+                    m_steps = df_daily['steps'].median()
+                    mask2 = df_daily['steps'] > m_steps
+                    if mask2.sum() >= 1 and (~mask2).sum() >= 1:
+                        avg_dw = df_daily[mask2]['dw_mins'].mean()
+                        if avg_dw > avg_dw_all * 1.05:
+                            patterns.append((avg_dw / avg_dw_all, "身体を動かし活動量（歩数）を平均以上に確保した日"))
+                            
+                # パターン3: 90分ブロック
+                mask3 = df_daily['longest_blank'] >= 90
+                if mask3.sum() >= 1 and (~mask3).sum() >= 1:
+                    avg_dw = df_daily[mask3]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "1日のどこかで「90分以上の連続した空白枠」を死守した日"))
+                        
+                # パターン4: 午前中のDWスタート
+                mask4 = df_daily['am_dw_mins'] > 0
+                if mask4.sum() >= 1 and (~mask4).sum() >= 1:
+                    avg_dw = df_daily[mask4]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "午前中のうちに1回でもDeep Workの波に乗れた日"))
+                        
+                # 効果が高い順にソートし、最大3つを取得
+                patterns.sort(key=lambda x: x[0], reverse=True)
+                top_patterns = patterns[:3]
+                
+                if top_patterns:
+                    icons = ["🥇", "🥈", "🥉"]
+                    for i, (ratio, text) in enumerate(top_patterns):
+                        st.info(f"{icons[i]} **「{text}」** は、波が途切れずDeep Work時間が平均の **{ratio:.1f}倍** になる傾向があります。")
+                else:
+                    st.info("💡 安定した成果を出しています。さらにデータが蓄積されると、あなた専用の「Deep Workが倍増する黄金パターン」がここに最大3つ表示されます。")
+            else:
+                st.info("💡 データの蓄積が進むと、あなた専用の「Deep Workが倍増する黄金パターン」がここに表示されます。")
+        else:
+            st.info("💡 データが十分に蓄積されると、あなた専用の「Deep Workが倍増する黄金パターン」がここに表示されます。（※比較のため数日分のデータが必要です）")
 
         # --- 波形グラフ (モメンタルグラフ) の復活・進化版 ---
         st.markdown("---")
