@@ -37,11 +37,15 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 🛑 パラメータ設定 (深思考保全エンジン)
 # ==========================================
-MIN_DEEP_DURATION = 60      # 深思考とみなす最低ブロック長(分)
-FOCUS_STREAK_MIN = 5        # 高集中が連続すべき最低時間(分)
-GAP_TOLERANCE = 5           # 許容する中断時間(分)
-MAX_DAILY_DEEP_BLOCKS = 1   # 1日に提示する深思考枠の最大数
-DISPLAY_DEEP_DURATION = 90  # 画面に提示する深思考枠の上限時間(分)
+MIN_DEEP_DURATION = 60          # 深思考とみなす最低ブロック長(分)
+GAP_TOLERANCE = 5               # 許容する中断時間(分)
+FOCUS_STREAK_MIN = 5            # 高集中が連続すべき最低時間(分)
+LOW_AROUSAL_HIGH = 66           # 低覚醒「高い」のパーセンタイル閾値
+LOW_AROUSAL_VERY_HIGH = 90      # 低覚醒「非常に高い」のパーセンタイル閾値
+LOW_AROUSAL_BLOCK_MINUTES = 30  # 重度低覚醒時の深思考禁止時間(分)
+LOW_AROUSAL_SHIFT_MINUTES = 10  # 中度低覚醒時の開始時間シフト(分)
+MAX_DAILY_DEEP_BLOCKS = 1       # 1日に提示する深思考枠の最大数
+DISPLAY_DEEP_DURATION = 90      # 画面に提示する深思考枠の上限時間(分)
 
 # --- カスタムCSS ---
 st.markdown("""
@@ -268,7 +272,7 @@ def make_wave_features(df_resampled, df_sched, freq_td):
     
     df_feat['hour'] = df_feat.index.hour
     df_feat['dayofweek'] = df_feat.index.dayofweek
-    df_feat['date'] = df_feat.index.date  # ← ここに date 列の作成処理を追加しました
+    df_feat['date'] = df_feat.index.date
     return df_feat, q70
 
 def compute_personal_metrics(df_feat, freq_td):
@@ -310,7 +314,7 @@ def train_predict_classifier(df_feat, ahead_steps):
     return model, feature_cols, eval_metrics, df_model
 
 # ==========================================
-# 🎯 C. 深思考保全エンジン (NeuroDesign Core)
+# 🎯 C. リアルタイム深思考保全エンジン (NeuroDesign Core)
 # ==========================================
 def add_1min_focus_wave(df_1min):
     df = df_1min.copy()
@@ -379,9 +383,9 @@ def evaluate_deep_success(df_1min, block, fatigue_drift_th):
     
     return 1 if (cond_A and cond_B and cond_C) else 0
 
-def compute_hourly_profile(df_1min, df_sched_raw, current_time):
-    past_start = current_time - pd.Timedelta(weeks=4)
-    past_blocks = extract_free_blocks(df_sched_raw, past_start, current_time)
+def compute_hourly_profile(df_1min, df_sched_raw, t_now):
+    past_start = t_now - pd.Timedelta(weeks=4)
+    past_blocks = extract_free_blocks(df_sched_raw, past_start, t_now)
     df_1m = add_1min_focus_wave(df_1min)
     
     slopes = []
@@ -418,75 +422,90 @@ def compute_hourly_profile(df_1min, df_sched_raw, current_time):
     profile['suitability'] = z_score(profile['success_rate']) - z_score(profile['mean_fat']) - z_score(profile['mean_aro'])
     return profile
 
-def optimize_today_deep_block(df_sched_raw, hourly_profile, current_time, cur_1m):
+def recommend_today_deep_block(df_1min, df_sched_raw, hourly_profile, t_now):
     """
-    当日の空き時間から、深思考に最も適した1枠だけを抽出する
+    リアルタイム状態(t_now)を反映して、当日残りの時間から1枠だけ深思考枠を抽出・提案する
     """
-    today_start = current_time.replace(hour=9, minute=0, second=0, microsecond=0)
-    today_end = current_time.replace(hour=19, minute=0, second=0, microsecond=0)
-    
-    if current_time >= today_end:
+    today_end = t_now.replace(hour=19, minute=0, second=0, microsecond=0)
+    if t_now >= today_end:
         return None, []
         
-    search_start = max(current_time, today_start)
-    future_blocks = extract_free_blocks(df_sched_raw, search_start, today_end)
+    # 1. 過去の低覚醒の分布計算 (パーセンタイル)
+    past_arousal = df_1min['low_arousal'].dropna()
+    p66 = np.percentile(past_arousal, LOW_AROUSAL_HIGH) if not past_arousal.empty else 0
+    p90 = np.percentile(past_arousal, LOW_AROUSAL_VERY_HIGH) if not past_arousal.empty else 0
     
-    if not future_blocks:
-        return None, []
-        
+    # 2. リアルタイム状態 (直近10分)
+    recent_10m = df_1min[df_1min.index <= t_now].last('10T')
+    low_arousal_now = recent_10m['low_arousal'].mean() if not recent_10m.empty else 0
+    fatigue_now = recent_10m['fatigue_smooth'].mean() if not recent_10m.empty else 50
+    
+    # 3. 候補抽出 (t_now 以降)
+    blocks = extract_free_blocks(df_sched_raw, t_now, today_end)
+    
     best_block = None
     best_score = -float('inf')
-    reasons = []
+    best_reasons = []
     
-    cur_fatigue = cur_1m.get('fatigue_smooth', 50.0)
-    cur_arousal = cur_1m.get('low_arousal', 0.0)
-    
-    for b in future_blocks:
-        h = b['hour']
+    for b in blocks:
+        start_dt = b['start_dt']
+        end_dt = b['end_dt']
+        reasons = []
+        
+        # リアルタイム補正ルール (低覚醒に基づく除外・シフト)
+        if low_arousal_now >= p90:
+            # 非常に高い: t_nowから30分は開始不可。かかる場合は除外。
+            if start_dt < t_now + pd.Timedelta(minutes=LOW_AROUSAL_BLOCK_MINUTES):
+                continue
+        elif low_arousal_now >= p66:
+            # 高い: 開始を10分後ろにシフトし、準備時間を確保
+            shift_start = max(start_dt, t_now + pd.Timedelta(minutes=LOW_AROUSAL_SHIFT_MINUTES))
+            if (end_dt - shift_start).total_seconds() / 60 >= MIN_DEEP_DURATION:
+                start_dt = shift_start
+                reasons.append("開始前に10分の歩行/ストレッチを推奨")
+            else:
+                continue # 60分確保できなくなった枠は捨てる
+                
+        duration = (end_dt - start_dt).total_seconds() / 60
+        if duration < MIN_DEEP_DURATION: continue
+            
+        h = start_dt.hour
         suitability = hourly_profile.loc[h, 'suitability'] if h in hourly_profile.index else 0
         
+        # 前後会議のペナルティ判定
         penalty = 0
         has_prev_meeting = False
-        has_next_meeting = False
         if df_sched_raw is not None and not df_sched_raw.empty:
-            prev_s = df_sched_raw[(df_sched_raw['end_dt'] > b['start_dt'] - pd.Timedelta(minutes=30)) & (df_sched_raw['end_dt'] <= b['start_dt'])]
-            next_s = df_sched_raw[(df_sched_raw['start_dt'] >= b['end_dt']) & (df_sched_raw['start_dt'] < b['end_dt'] + pd.Timedelta(minutes=30))]
+            prev_s = df_sched_raw[(df_sched_raw['end_dt'] > start_dt - pd.Timedelta(minutes=30)) & (df_sched_raw['end_dt'] <= start_dt)]
+            next_s = df_sched_raw[(df_sched_raw['start_dt'] >= end_dt) & (df_sched_raw['start_dt'] < end_dt + pd.Timedelta(minutes=30))]
             if not prev_s.empty:
                 penalty -= 0.5
                 has_prev_meeting = True
             if not next_s.empty:
                 penalty -= 0.5
-                has_next_meeting = True
                 
-        mins_to_start = (b['start_dt'] - current_time).total_seconds() / 60
-        recovery_bonus = (mins_to_start / 60.0) * 0.5 if (cur_fatigue > 60 or cur_arousal > 2.0) else 0
-        
-        score = suitability + penalty + recovery_bonus
+        # 最終スコア: 時間帯適性 - ペナルティ - 疲労補正(50を基準に減点)
+        score = suitability + penalty - ((fatigue_now - 50) / 10.0)
         
         if score > best_score:
             best_score = score
-            b_reasons = []
+            base_reasons = []
             if suitability > 0:
-                b_reasons.append("この時間帯は過去の深思考成功率が高い傾向にあります。")
-            if not has_prev_meeting and not has_next_meeting:
-                b_reasons.append("前後に会議がなく、集中を分断されるリスクが低いです。")
-            else:
-                b_reasons.append("限られた空き時間の中で最も条件が良い枠です。")
+                base_reasons.append("時間帯の成功率が高い傾向にあります。")
+            if not has_prev_meeting:
+                base_reasons.append("前後に会議がなく分断リスクが低いです。")
+            if fatigue_now < 50:
+                base_reasons.append("現在の疲労リスクが低く集中しやすい状態です。")
                 
-            if recovery_bonus > 0:
-                b_reasons.append("現在の疲労・低覚醒状態から回復するまでの猶予が確保されています。")
-            else:
-                fatigue_h = hourly_profile.loc[h, 'mean_fat'] if h in hourly_profile.index else 50
-                if fatigue_h < 50:
-                    b_reasons.append("この時間帯は疲労・低覚醒リスクが低い傾向にあります。")
-                    
-            reasons = b_reasons[:3]
+            best_reasons = base_reasons[:2] + reasons # 理由を最大3行に収める
+            b['adj_start_dt'] = start_dt
+            b['adj_end_dt'] = end_dt
             best_block = b
 
     if best_block:
-        display_duration = min(best_block['duration'], DISPLAY_DEEP_DURATION)
-        best_block['display_end_dt'] = best_block['start_dt'] + pd.Timedelta(minutes=display_duration)
-        return best_block, reasons
+        disp_dur = min((best_block['adj_end_dt'] - best_block['adj_start_dt']).total_seconds() / 60, DISPLAY_DEEP_DURATION)
+        best_block['display_end_dt'] = best_block['adj_start_dt'] + pd.Timedelta(minutes=disp_dur)
+        return best_block, best_reasons
     
     return None, []
 
@@ -506,21 +525,13 @@ with st.sidebar:
         selected_dows = st.multiselect("分析対象とする曜日", dow_options, default=dow_options[0:5])
         time_range = st.slider("グラフ表示時間帯", 0, 23, (9, 19))
         selected_dow_indices = [dow_options.index(d) for d in selected_dows]
-        
-    st.markdown("---")
-    run_btn = st.button("🚀 NeuroDesign 実行", type="primary", use_container_width=True)
 
 freq_td = pd.Timedelta(RESAMPLE_FREQ)
 ahead_steps = max(1, int(pd.Timedelta(minutes=PREDICT_AHEAD_MINS) / freq_td))
-TARGET_DATETIME = TARGET_DATETIME_STR if TARGET_DATETIME_STR.strip() != "" else None
 
 # === メイン処理パイプライン ===
-if run_btn or file_ts is not None:
-    if file_ts is None:
-        st.info("👈 サイドバーから「生体データ」をアップロードしてください。")
-        st.stop()
-        
-    with st.spinner("深思考マネジメントエンジンを起動中..."):
+if file_ts is not None:
+    with st.spinner("NeuroDesign エンジンを起動中..."):
         df_ts_raw = pd.read_csv(io.BytesIO(file_ts.getvalue()), skiprows=2)
         df_ts_raw['timestamp_clean'] = df_ts_raw['timestamp'].astype(str).str.split(' GMT').str[0]
         df_ts_raw['datetime'] = pd.to_datetime(df_ts_raw['timestamp_clean'], errors='coerce')
@@ -550,22 +561,25 @@ if run_btn or file_ts is not None:
             
         df_feat, q70_thresh = make_wave_features(df_resampled, df_sched_raw, freq_td)
         
+        # 基準時刻 (t_now) の設定
+        TARGET_DATETIME = TARGET_DATETIME_STR if TARGET_DATETIME_STR.strip() != "" else None
         if TARGET_DATETIME:
             try:
-                current_time = pd.to_datetime(TARGET_DATETIME)
-                target_data_all = df_feat[df_feat.index <= current_time]
+                t_now = pd.to_datetime(TARGET_DATETIME)
+                target_data_all = df_feat[df_feat.index <= t_now]
                 target_data = target_data_all.iloc[-1:] if not target_data_all.empty else df_feat.iloc[-1:]
             except:
+                t_now = df_feat.index[-1]
                 target_data = df_feat.iloc[-1:]
         else:
+            t_now = df_feat.index[-1]
             target_data = df_feat.iloc[-1:]
-        current_time = target_data.index[0]
         
         metrics = compute_personal_metrics(df_feat, freq_td)
         model, feature_cols, eval_metrics, df_model = train_predict_classifier(df_feat, ahead_steps)
         focus_prob = model.predict_proba(target_data[feature_cols])[0, 1] if model is not None else 0.0
 
-        current_1min = df_1min[df_1min.index <= current_time]
+        current_1min = df_1min[df_1min.index <= t_now]
         cur_1m = current_1min.iloc[-1] if not current_1min.empty else df_1min.iloc[-1]
         
         fatigue_band = cur_1m.get('fatigue_level_band', '不明')
@@ -579,7 +593,7 @@ if run_btn or file_ts is not None:
         avg_period = metrics['avg_wave_period']
         last_peak_time_val = target_data['last_peak_time'].values[0]
         if pd.notna(last_peak_time_val):
-            mins_since_peak = (current_time - pd.to_datetime(last_peak_time_val)).total_seconds() / 60
+            mins_since_peak = (t_now - pd.to_datetime(last_peak_time_val)).total_seconds() / 60
             next_peak_in = max(0, int(avg_period - mins_since_peak))
         else:
             next_peak_in = int(avg_period)
@@ -590,28 +604,33 @@ if run_btn or file_ts is not None:
         elif la_band == '高' and fatigue_band == '高': action_text = "疲労と眠気がピークに達しています。無理な作業は控え、完全な休息を取ることを強く推奨します。"
         elif la_band == '高' and fatigue_band == '低': action_text = "疲労は少ないですが、単調さから眠気が生じています。少し立ち上がって歩くなど、姿勢を変えてみましょう。"
 
-        # --- 最適な深思考枠の算出 ---
+        # --- リアルタイム状態に基づく深思考枠の再提案 ---
         best_deep_block = None
         deep_reasons = []
         if file_sched is not None:
-            hourly_profile = compute_hourly_profile(df_1min, df_sched_raw, current_time)
-            best_deep_block, deep_reasons = optimize_today_deep_block(df_sched_raw, hourly_profile, current_time, cur_1m)
+            hourly_profile = compute_hourly_profile(df_1min, df_sched_raw, t_now)
+            best_deep_block, deep_reasons = recommend_today_deep_block(df_1min, df_sched_raw, hourly_profile, t_now)
 
     # ==========================================
     # UI 描画
     # ==========================================
-    st.markdown(f"<p style='text-align: right; color: gray;'>最終更新: {current_time.strftime('%Y/%m/%d %H:%M')}</p>", unsafe_allow_html=True)
+    # 更新ヘッダ部
+    col_h1, col_h2 = st.columns([3, 1])
+    with col_h1:
+        st.markdown(f"<p style='color: gray; margin-top: 15px;'>システム基準時刻 (t_now): {t_now.strftime('%Y/%m/%d %H:%M')}</p>", unsafe_allow_html=True)
+    with col_h2:
+        if st.button("🔄 リアルタイム状態を反映して再提案", use_container_width=True):
+            st.rerun()
     
     tab_today, tab_weekly, tab_spec = st.tabs(["🌊 Today", "📊 Weekly Report", "👤 My Spec"])
 
     # --- TAB 1: Today ---
     with tab_today:
-        st.markdown("### 今日の深思考")
+        st.markdown("### 👑 今日の深思考 (The Only Block)")
         
         if best_deep_block:
-            start_str = best_deep_block['start_dt'].strftime('%H:%M')
+            start_str = best_deep_block['adj_start_dt'].strftime('%H:%M')
             end_str = best_deep_block['display_end_dt'].strftime('%H:%M')
-            
             reasons_html = '<br>'.join(['・' + r for r in deep_reasons])
             
             st.markdown(f"""
@@ -699,7 +718,7 @@ if run_btn or file_ts is not None:
         st.markdown("#### 🌊 今週の集中波形 (モメンタルグラフ)")
         st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン」です。波の周期性が確認できます。")
         
-        df_this_week = df_feat[(df_feat['date'] > (current_time.date() - pd.Timedelta(days=7))) & (df_feat['date'] <= current_time.date())]
+        df_this_week = df_feat[(df_feat['date'] > (t_now.date() - pd.Timedelta(days=7))) & (df_feat['date'] <= t_now.date())]
         week_dates = df_this_week['date'].unique()
         week_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
         if len(week_dates) > 0:
