@@ -260,8 +260,15 @@ def make_wave_features(df_resampled, df_sched, freq_td):
                 
     win_steps_2h = max(1, int(pd.Timedelta('2H') / freq_td))
     df_feat['schedule_density_2h'] = df_feat['has_schedule'].rolling(win_steps_2h, min_periods=1).mean().shift(1).fillna(0)
+    df_feat['deep_work'] = ((df_feat['has_schedule'] == 0) & (df_feat['is_high_focus_wave'] == 1)).astype(int)
+    
+    dw_series = df_feat['deep_work']
+    df_feat['dw_block_id'] = (dw_series != dw_series.shift()).cumsum()
+    df_feat['dw_block_id'] = df_feat['dw_block_id'].where(dw_series == 1, np.nan)
+    
     df_feat['hour'] = df_feat.index.hour
     df_feat['dayofweek'] = df_feat.index.dayofweek
+    df_feat['date'] = df_feat.index.date  # ← ここに date 列の作成処理を追加しました
     return df_feat, q70
 
 def compute_personal_metrics(df_feat, freq_td):
