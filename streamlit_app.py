@@ -388,7 +388,13 @@ with st.sidebar:
         RESAMPLE_FREQ = st.selectbox("分析単位 (波解像度)", ['1T', '5T', '10T', '30T'], index=1)
         PREDICT_AHEAD_MINS = st.selectbox("予測先 (分)", [30, 60], index=0)
         TARGET_DATETIME_STR = st.text_input("予測基準日時 (空欄で最新)")
+        
+        st.markdown("**📅 分析対象フィルタ**")
+        dow_options = ["月", "火", "水", "木", "金", "土", "日"]
+        selected_dows = st.multiselect("分析対象とする曜日", dow_options, default=dow_options[0:5])
         time_range = st.slider("グラフ表示時間帯", 0, 23, (9, 19))
+        
+        selected_dow_indices = [dow_options.index(d) for d in selected_dows]
         
     st.markdown("---")
     run_btn = st.button("🚀 コンディションを解析", type="primary", use_container_width=True)
@@ -700,6 +706,8 @@ if run_btn or file_ts is not None:
         st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン（Deep Workの候補）」です。波の周期性（リズム）が視覚的に確認できます。")
         
         week_dates = df_this_week['date'].unique()
+        # 選択された曜日のみ表示
+        week_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
         if len(week_dates) > 0:
             for i in range(0, len(week_dates), 2):
                 cols = st.columns(2)
@@ -738,7 +746,14 @@ if run_btn or file_ts is not None:
         st.markdown("## 👤 あなたの「集中ダイナミクス」攻略法")
         st.write("過去の全データを波形解析し、あなた固有の集中リズムを抽出しました。")
         
-        best_hour = df_feat.groupby('hour')['deep_work'].sum().idxmax()
+        # 設定された曜日と時間帯でフィルタリング
+        df_feat_spec = df_feat[df_feat.index.dayofweek.isin(selected_dow_indices)].copy()
+        df_feat_spec = df_feat_spec[(df_feat_spec.index.hour >= time_range[0]) & (df_feat_spec.index.hour <= time_range[1])]
+        
+        df_1min_spec = df_1min[df_1min.index.dayofweek.isin(selected_dow_indices)].copy()
+        df_1min_spec = df_1min_spec[(df_1min_spec.index.hour >= time_range[0]) & (df_1min_spec.index.hour <= time_range[1])]
+
+        best_hour = df_feat_spec.groupby('hour')['deep_work'].sum().idxmax() if not df_feat_spec.empty else 0
         
         c_spec1, c_spec2, c_spec3 = st.columns(3)
         c_spec1.metric("⏱ 平均集中波 周期", f"{int(metrics['avg_wave_period'])} 分", "波が訪れる間隔")
@@ -746,7 +761,7 @@ if run_btn or file_ts is not None:
         c_spec3.metric("📈 波の平均振幅", f"{metrics['avg_wave_amplitude']:.1f} pt", "集中の深さの指標")
         
         st.markdown("""
-        <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #3b82f6; margin-top: 20px;">
+        <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #3b82f6; margin-top: 20px; margin-bottom: 30px;">
             <h4>📝 AIからのパーソナルコメント</h4>
             <ul style="font-size: 1.1rem; color: #334155; line-height: 1.6;">
                 <li>あなたの集中は<strong>約 {0} 分周期</strong>の波を描いています。疲れた時は無理をせず、次の波が来るタイミングに合わせて作業を再開するのが効率的です。</li>
@@ -755,6 +770,75 @@ if run_btn or file_ts is not None:
             </ul>
         </div>
         """.format(int(metrics['avg_wave_period']), best_hour), unsafe_allow_html=True)
+
+        # --- コンディション特性グラフの追加 ---
+        st.markdown("---")
+        st.markdown("### 📊 曜日・時間帯別のコンディション特性")
+        st.write("設定した曜日・時間帯における「集中」「疲労」「低覚醒」の傾向を可視化しています。")
+
+        st.markdown("#### 🕒 時間帯別 平均ステータス")
+        col_g1, col_g2, col_g3 = st.columns(3)
+        
+        if not df_feat_spec.empty:
+            hour_focus = df_feat_spec.groupby(df_feat_spec.index.hour)['is_high_focus_wave'].mean() * 100
+            with col_g1:
+                fig1 = px.bar(x=[f"{h}:00" for h in hour_focus.index], y=hour_focus.values, title="高集中波 発生確率 (%)", labels={'x': '時間帯', 'y': '確率 (%)'})
+                fig1.update_traces(marker_color='#3b82f6')
+                st.plotly_chart(fig1, use_container_width=True)
+                
+        if not df_1min_spec.empty:
+            hour_fatigue = df_1min_spec.groupby(df_1min_spec.index.hour)['fatigue_smooth'].mean()
+            with col_g2:
+                fig2 = px.bar(x=[f"{h}:00" for h in hour_fatigue.index], y=hour_fatigue.values, title="平均疲労スコア", labels={'x': '時間帯', 'y': 'スコア'})
+                fig2.update_traces(marker_color='#ef4444')
+                st.plotly_chart(fig2, use_container_width=True)
+                
+            hour_arousal = df_1min_spec.groupby(df_1min_spec.index.hour)['low_arousal'].mean()
+            with col_g3:
+                fig3 = px.bar(x=[f"{h}:00" for h in hour_arousal.index], y=hour_arousal.values, title="平均低覚醒スコア", labels={'x': '時間帯', 'y': 'スコア'})
+                fig3.update_traces(marker_color='#8b5cf6')
+                st.plotly_chart(fig3, use_container_width=True)
+
+        st.markdown("#### 📍 曜日×時間帯 ヒートマップ")
+        
+        def plot_heatmap(df, val_col, title, colorscale, is_prob=False):
+            if df.empty or val_col not in df.columns: return None
+            df_hm = df.copy()
+            df_hm['hour'] = df_hm.index.hour
+            df_hm['dow'] = df_hm.index.dayofweek
+            pivot = df_hm.pivot_table(values=val_col, index='hour', columns='dow', aggfunc='mean')
+            
+            if is_prob:
+                pivot = pivot * 100
+                
+            valid_dows = [d for d in selected_dow_indices if d in pivot.columns]
+            valid_hours = list(range(time_range[0], time_range[1]+1))
+            
+            if not valid_dows: return None
+            
+            heatmap_data = np.full((len(valid_hours), len(valid_dows)), np.nan)
+            for i, h in enumerate(valid_hours):
+                for j, d in enumerate(valid_dows):
+                    if h in pivot.index and d in pivot.columns:
+                        heatmap_data[i, j] = pivot.loc[h, d]
+                        
+            x_labels = [dow_options[d] for d in valid_dows]
+            y_labels = [f"{h}:00" for h in valid_hours]
+            
+            fig = go.Figure(data=go.Heatmap(z=heatmap_data, x=x_labels, y=y_labels, colorscale=colorscale, hoverongaps=False))
+            fig.update_layout(title=title, yaxis_autorange='reversed', height=350, margin=dict(l=20, r=20, t=40, b=20))
+            return fig
+            
+        col_hm1, col_hm2, col_hm3 = st.columns(3)
+        with col_hm1:
+            fig_hm1 = plot_heatmap(df_feat_spec, 'is_high_focus_wave', '高集中 確率 (%)', 'Blues', is_prob=True)
+            if fig_hm1: st.plotly_chart(fig_hm1, use_container_width=True)
+        with col_hm2:
+            fig_hm2 = plot_heatmap(df_1min_spec, 'fatigue_smooth', '疲労スコア', 'Reds')
+            if fig_hm2: st.plotly_chart(fig_hm2, use_container_width=True)
+        with col_hm3:
+            fig_hm3 = plot_heatmap(df_1min_spec, 'low_arousal', '低覚醒スコア', 'Purples')
+            if fig_hm3: st.plotly_chart(fig_hm3, use_container_width=True)
 
     # --- 開発者向けセクション ---
     with st.expander("🛠 開発者向け情報 (モデル評価・パラメータ・特徴量)"):
