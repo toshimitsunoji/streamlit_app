@@ -385,7 +385,6 @@ def extract_free_blocks(df_sched_raw, start_dt, end_dt):
             mask = (df_dummy.index >= row['start_dt']) & (df_dummy.index < row['end_dt'])
             df_dummy.loc[mask, 'has_schedule'] = 1
             
-    # GAP_TOLERANCE 以下の予定は無視
     sched_blocks = (df_dummy['has_schedule'] != df_dummy['has_schedule'].shift()).cumsum()
     for b_id, b_df in df_dummy[df_dummy['has_schedule'] == 1].groupby(sched_blocks):
         if len(b_df) <= GAP_TOLERANCE:
@@ -407,16 +406,14 @@ def evaluate_deep_success(df_1min, block, fatigue_drift_th):
     b_df = df_1min[(df_1min.index >= block['start_dt']) & (df_1min.index < block['end_dt'])]
     if len(b_df) < MIN_DEEP_DURATION: return 0
         
-    # A: 高集中が連続5分以上
     focus = b_df.get('is_high_focus_wave', pd.Series(0, index=b_df.index))
     if focus.sum() == 0: cond_A = False
     else:
         focus_streaks = focus.groupby((focus != focus.shift()).cumsum()).sum()
         cond_A = focus_streaks.max() >= FOCUS_STREAK_MIN
         
-    cond_B = True # ブロック抽出時に対処済
+    cond_B = True 
     
-    # C: fatigue_smoothの傾きが上位20%以下
     fatigue = b_df.get('fatigue_smooth', pd.Series(0, index=b_df.index)).dropna()
     if len(fatigue) > 10:
         x = np.arange(len(fatigue))
@@ -519,6 +516,90 @@ def optimize_next_week(df_sched_raw, hourly_profile, current_time):
         else: b['type'] = '軽思考 (Light Thinking)'
             
     return deep_blocks, other_blocks
+
+def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
+    """
+    Plotlyを用いて今後7日間のタスク最適配置スケジュール（ガントチャート風）を描画する関数
+    """
+    timeline_data = []
+    base_date = datetime.date(2000, 1, 1) # X軸を時間のみで揃えるためのダミー日付
+    
+    target_dates = [(current_time.date() + datetime.timedelta(days=i)) for i in range(7)]
+    
+    for d in target_dates:
+        if d.weekday() >= 5: continue # 平日のみ表示
+        
+        date_str = f"{d.strftime('%m/%d')} ({['月','火','水','木','金','土','日'][d.weekday()]})"
+        
+        # 既存の予定を追加
+        if df_sched_raw is not None and not df_sched_raw.empty:
+            day_sched = df_sched_raw[df_sched_raw['start_dt'].dt.date == d]
+            for _, row in day_sched.iterrows():
+                # 9:00〜19:00の範囲内に表示をトリミング
+                start_h = max(row['start_dt'], datetime.datetime.combine(d, datetime.time(9, 0)))
+                end_h = min(row['end_dt'], datetime.datetime.combine(d, datetime.time(19, 0)))
+                if start_h < end_h:
+                    dummy_start = datetime.datetime.combine(base_date, start_h.time())
+                    dummy_end = datetime.datetime.combine(base_date, end_h.time())
+                    timeline_data.append({
+                        'DateStr': date_str, 'Start': dummy_start, 'Finish': dummy_end,
+                        'Type': '既存の予定', 'Task': row['件名'] if '件名' in row else '予定'
+                    })
+                    
+        # 深思考枠を追加
+        for b in deep_blocks:
+            if b['start_dt'].date() == d:
+                dummy_start = datetime.datetime.combine(base_date, b['start_dt'].time())
+                dummy_end = datetime.datetime.combine(base_date, b['end_dt'].time())
+                timeline_data.append({
+                    'DateStr': date_str, 'Start': dummy_start, 'Finish': dummy_end,
+                    'Type': '👑 深思考', 'Task': '深思考枠'
+                })
+                
+        # その他の推奨枠を追加
+        for b in other_blocks:
+            if b['start_dt'].date() == d:
+                dummy_start = datetime.datetime.combine(base_date, b['start_dt'].time())
+                dummy_end = datetime.datetime.combine(base_date, b['end_dt'].time())
+                type_label = '⚡ 仕上げ' if '仕上げ' in b['type'] else '💬 軽作業' if '軽思考' in b['type'] else '予備'
+                timeline_data.append({
+                    'DateStr': date_str, 'Start': dummy_start, 'Finish': dummy_end,
+                    'Type': type_label, 'Task': type_label
+                })
+                
+    df_tl = pd.DataFrame(timeline_data)
+    if df_tl.empty: return None
+        
+    # 日付の降順にソート（グラフ上で上から下へ新しい日付を並べるため）
+    df_tl['DateObj'] = pd.to_datetime(df_tl['DateStr'].str.extract(r'(\d{2}/\d{2})')[0], format='%m/%d')
+    df_tl = df_tl.sort_values('DateObj', ascending=False)
+
+    fig = px.timeline(
+        df_tl, x_start="Start", x_end="Finish", y="DateStr", color="Type",
+        color_discrete_map={
+            '既存の予定': '#e2e8f0', 
+            '👑 深思考': '#8b5cf6', 
+            '⚡ 仕上げ': '#10b981', 
+            '💬 軽作業': '#3b82f6',
+            '予備': '#f59e0b'
+        },
+        hover_data=["Task"]
+    )
+    
+    # 横軸のフォーマットを時間だけに設定
+    fig.update_layout(
+        xaxis=dict(
+            tickformat="%H:%M",
+            range=[datetime.datetime.combine(base_date, datetime.time(9, 0)), 
+                   datetime.datetime.combine(base_date, datetime.time(19, 0))]
+        ),
+        yaxis=dict(title=""),
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend_title_text='',
+        plot_bgcolor='rgba(248, 250, 252, 0.5)'
+    )
+    return fig
 
 # --- サイドバーUI ---
 with st.sidebar:
@@ -732,7 +813,6 @@ if run_btn or file_ts is not None:
     # --- TAB 2: Weekly Report ---
     with tab_weekly:
         st.markdown("## 今週のパフォーマンスとコンディション振り返り")
-        # 既存コードと同等のため省略(表示のみ)
         df_this_week = df_feat[(df_feat['date'] > (current_time.date() - pd.Timedelta(days=7))) & (df_feat['date'] <= current_time.date())]
         tw_dw = df_this_week['deep_work'].sum() * (freq_td.total_seconds() / 60)
         st.metric("今週のDeep Work合計時間", f"{int(tw_dw)} 分")
@@ -740,6 +820,112 @@ if run_btn or file_ts is not None:
         st.markdown("#### 📅 日別コンディション・サマリー (疲労と回復)")
         df_daily_cond = summarize_daily_condition(df_1min)
         if not df_daily_cond.empty: st.dataframe(df_daily_cond, use_container_width=True)
+
+        st.markdown("#### 💡 データが見つけた黄金パターン")
+        df_feat_wd = df_feat[df_feat['dayofweek'] < 5].copy()
+        if not df_feat_wd.empty and df_feat_wd['date'].nunique() >= 3:
+            daily_stats = []
+            for d, group in df_feat_wd.groupby('date'):
+                am_group = group[group.index.hour < 12]
+                pm_group = group[group.index.hour >= 12]
+                
+                dw_mins = group['deep_work'].sum() * (freq_td.total_seconds() / 60)
+                am_dw_mins = am_group['deep_work'].sum() * (freq_td.total_seconds() / 60)
+                am_meeting = am_group['is_meeting'].sum() * (freq_td.total_seconds() / 60)
+                pm_blank = (pm_group['has_schedule'] == 0).sum() * (freq_td.total_seconds() / 60)
+                steps = group['1分間歩数'].sum() if '1分間歩数' in group.columns else 0
+                
+                blank_mask = group['has_schedule'] == 0
+                blank_blocks = blank_mask.groupby((blank_mask != blank_mask.shift()).cumsum()).sum()
+                longest_blank = blank_blocks.max() * (freq_td.total_seconds() / 60) if not blank_blocks.empty else 0
+                
+                daily_stats.append({
+                    'date': d, 'dw_mins': dw_mins, 'am_dw_mins': am_dw_mins,
+                    'am_meeting': am_meeting, 'pm_blank': pm_blank,
+                    'steps': steps, 'longest_blank': longest_blank
+                })
+                
+            df_daily = pd.DataFrame(daily_stats)
+            avg_dw_all = df_daily['dw_mins'].mean()
+            
+            if avg_dw_all > 0:
+                patterns = []
+                m_am = df_daily['am_meeting'].median()
+                m_pm = df_daily['pm_blank'].median()
+                mask1 = (df_daily['am_meeting'] >= m_am) & (df_daily['pm_blank'] >= m_pm) & (df_daily['am_meeting'] > 0)
+                if mask1.sum() >= 1 and (~mask1).sum() >= 1:
+                    avg_dw = df_daily[mask1]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "午前中に会議を寄せて、午後にまとまった空白を作った日"))
+                        
+                if df_daily['steps'].max() > 0:
+                    m_steps = df_daily['steps'].median()
+                    mask2 = df_daily['steps'] > m_steps
+                    if mask2.sum() >= 1 and (~mask2).sum() >= 1:
+                        avg_dw = df_daily[mask2]['dw_mins'].mean()
+                        if avg_dw > avg_dw_all * 1.05:
+                            patterns.append((avg_dw / avg_dw_all, "身体を動かし活動量（歩数）を平均以上に確保した日"))
+                            
+                mask3 = df_daily['longest_blank'] >= 90
+                if mask3.sum() >= 1 and (~mask3).sum() >= 1:
+                    avg_dw = df_daily[mask3]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "1日のどこかで「90分以上の連続した空白枠」を死守した日"))
+                        
+                mask4 = df_daily['am_dw_mins'] > 0
+                if mask4.sum() >= 1 and (~mask4).sum() >= 1:
+                    avg_dw = df_daily[mask4]['dw_mins'].mean()
+                    if avg_dw > avg_dw_all * 1.05:
+                        patterns.append((avg_dw / avg_dw_all, "午前中のうちに1回でもDeep Workの波に乗れた日"))
+                        
+                patterns.sort(key=lambda x: x[0], reverse=True)
+                top_patterns = patterns[:3]
+                
+                if top_patterns:
+                    icons = ["🥇", "🥈", "🥉"]
+                    for i, (ratio, text) in enumerate(top_patterns):
+                        st.info(f"{icons[i]} **「{text}」** は、波が途切れずDeep Work時間が平均の **{ratio:.1f}倍** になる傾向があります。")
+                else:
+                    st.info("💡 安定した成果を出しています。さらにデータが蓄積されると、あなた専用の「黄金パターン」がここに表示されます。")
+
+        st.markdown("---")
+        st.markdown("#### 🌊 今週の集中波形 (モメンタルグラフ)")
+        st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン」です。波の周期性が確認できます。")
+        
+        week_dates = df_this_week['date'].unique()
+        week_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
+        if len(week_dates) > 0:
+            for i in range(0, len(week_dates), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i + j < len(week_dates):
+                        t_date = week_dates[i+j]
+                        with cols[j]:
+                            df_day = df_this_week[df_this_week['date'] == t_date].copy()
+                            df_day = df_day[(df_day.index.hour >= time_range[0]) & (df_day.index.hour <= time_range[1])]
+                            
+                            if not df_day.empty and not df_day['focus_smooth'].isna().all():
+                                fig_d = go.Figure()
+                                q70_val = q70_thresh 
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[q70_val]*len(df_day), mode='lines', line=dict(color='gray', width=1, dash='dash'), name='高集中ライン', hoverinfo='skip'))
+                                y_up = np.where(df_day['focus_smooth'] >= q70_val, df_day['focus_smooth'], q70_val)
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=y_up, fill='tonexty', fillcolor='rgba(59, 130, 246, 0.3)', mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=[q70_val]*len(df_day), fill='tonexty', fillcolor='rgba(0,0,0,0)', mode='lines', line=dict(width=0), hoverinfo='skip', showlegend=False))
+                                fig_d.add_trace(go.Scatter(x=df_day.index, y=df_day['focus_smooth'], mode='lines', line=dict(color='#3b82f6', width=2), name='集中波', hovertemplate="%{x|%H:%M}<br>強度: %{y:.1f}<extra></extra>"))
+                                peaks_day = df_day[df_day['is_peak'] == 1]
+                                if not peaks_day.empty:
+                                    fig_d.add_trace(go.Scatter(x=peaks_day.index, y=peaks_day['focus_smooth'], mode='markers', marker=dict(color='#ef4444', size=6, symbol='circle'), name='ピーク', hovertemplate="%{x|%H:%M}<br>ピーク<extra></extra>"))
+                                dow_str = ['月','火','水','木','金','土','日'][t_date.weekday()]
+                                fig_d.update_layout(title=f"{t_date.strftime('%m/%d')} ({dow_str})", height=250, hovermode="x unified", plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
+                                fig_d.update_xaxes(showgrid=True, gridcolor='lightgray')
+                                y_min = df_day['focus_smooth'].min()
+                                y_max = df_day['focus_smooth'].max()
+                                amp = y_max - y_min if y_max - y_min > 0 else 10
+                                fig_d.update_yaxes(showgrid=True, gridcolor='lightgray', title="集中強度", range=[max(0, y_min - amp*0.2), y_max + amp*0.2])
+                                st.plotly_chart(fig_d, use_container_width=True)
+                            else:
+                                st.markdown(f"**{t_date.strftime('%m/%d')} ({['月','火','水','木','金','土','日'][t_date.weekday()]})**")
+                                st.info("指定された時間帯のデータがありません。")
 
     # --- TAB 3: This Week Design (タスク最適配置) ---
     with tab_design:
@@ -773,6 +959,17 @@ if run_btn or file_ts is not None:
                                 st.success(f"**{time_str}** (時間帯成功率: {succ_rate:.1f}%)")
                         else:
                             st.warning("今後7日間に60分以上のまとまった空き時間がありません。予定を調整してブロックを確保してください。")
+
+                    # === 📅 スケジュール表 (ガントチャート) の追加 ===
+                    st.markdown("---")
+                    st.markdown("### 📅 今後7日間のタスク最適配置スケジュール")
+                    st.caption("既存の予定（グレー）の隙間に、あなたの特性に合わせた最適なタスクブロックを配置しました。")
+                    
+                    fig_schedule = plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time)
+                    if fig_schedule:
+                        st.plotly_chart(fig_schedule, use_container_width=True)
+                    else:
+                        st.info("表示できるスケジュールデータがありません。")
                     
                     st.markdown("---")
                     st.markdown("### 📝 その他の推奨配置")
@@ -809,9 +1006,98 @@ if run_btn or file_ts is not None:
     with tab_spec:
         st.markdown("## 👤 あなたの「集中ダイナミクス」攻略法")
         st.write("過去の全データを波形解析し、あなた固有の集中リズムを抽出しました。")
-        best_hour = df_feat.groupby('hour')['deep_work'].sum().idxmax()
+        
+        df_feat_spec = df_feat[df_feat.index.dayofweek.isin(selected_dow_indices)].copy()
+        df_feat_spec = df_feat_spec[(df_feat_spec.index.hour >= time_range[0]) & (df_feat_spec.index.hour <= time_range[1])]
+        
+        df_1min_spec = df_1min[df_1min.index.dayofweek.isin(selected_dow_indices)].copy()
+        df_1min_spec = df_1min_spec[(df_1min_spec.index.hour >= time_range[0]) & (df_1min_spec.index.hour <= time_range[1])]
+
+        best_hour = df_feat_spec.groupby('hour')['deep_work'].sum().idxmax() if not df_feat_spec.empty else 0
         
         c_spec1, c_spec2, c_spec3 = st.columns(3)
-        c_spec1.metric("⏱ 平均集中波 周期", f"{int(metrics['avg_wave_period'])} 分")
-        c_spec2.metric("🎯 最適集中時間帯", f"{best_hour}:00 台")
-        c_spec3.metric("📈 波の平均振幅", f"{metrics['avg_wave_amplitude']:.1f} pt")
+        c_spec1.metric("⏱ 平均集中波 周期", f"{int(metrics['avg_wave_period'])} 分", "波が訪れる間隔")
+        c_spec2.metric("🎯 最適集中時間帯", f"{best_hour}:00 台", "波が最大化する時間")
+        c_spec3.metric("📈 波の平均振幅", f"{metrics['avg_wave_amplitude']:.1f} pt", "集中の深さの指標")
+        
+        st.markdown("""
+        <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #3b82f6; margin-top: 20px; margin-bottom: 30px;">
+            <h4>📝 AIからのパーソナルコメント</h4>
+            <ul style="font-size: 1.1rem; color: #334155; line-height: 1.6;">
+                <li>あなたの集中は<strong>約 {0} 分周期</strong>の波を描いています。疲れた時は無理をせず、次の波が来るタイミングに合わせて作業を再開するのが効率的です。</li>
+                <li><strong>{1}時台</strong>に波の振幅が最大化し、極めて深い集中状態に入りやすくなります。この時間帯は死守してください。</li>
+                <li>予定の合間が短すぎると、波が上昇しきる前に分断されてしまう「分断ロス」が発生しています。会議は固めて配置しましょう。</li>
+            </ul>
+        </div>
+        """.format(int(metrics['avg_wave_period']), best_hour), unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("### 📊 曜日・時間帯別のコンディション特性")
+        st.write("設定した曜日・時間帯における「集中」「疲労」「低覚醒」の傾向を可視化しています。")
+
+        st.markdown("#### 🕒 時間帯別 平均ステータス")
+        col_g1, col_g2, col_g3 = st.columns(3)
+        
+        if not df_feat_spec.empty:
+            hour_focus = df_feat_spec.groupby(df_feat_spec.index.hour)['is_high_focus_wave'].mean() * 100
+            with col_g1:
+                fig1 = px.bar(x=[f"{h}:00" for h in hour_focus.index], y=hour_focus.values, title="高集中波 発生確率 (%)", labels={'x': '時間帯', 'y': '確率 (%)'})
+                fig1.update_traces(marker_color='#3b82f6')
+                st.plotly_chart(fig1, use_container_width=True)
+                
+        if not df_1min_spec.empty:
+            hour_fatigue = df_1min_spec.groupby(df_1min_spec.index.hour)['fatigue_smooth'].mean()
+            with col_g2:
+                fig2 = px.bar(x=[f"{h}:00" for h in hour_fatigue.index], y=hour_fatigue.values, title="平均疲労スコア", labels={'x': '時間帯', 'y': 'スコア'})
+                fig2.update_traces(marker_color='#ef4444')
+                f_min, f_max = hour_fatigue.min(), hour_fatigue.max()
+                if pd.notna(f_min) and pd.notna(f_max):
+                    fig2.update_yaxes(range=[math.floor(f_min) - 2, math.ceil(f_max) + 2])
+                st.plotly_chart(fig2, use_container_width=True)
+                
+            hour_arousal = df_1min_spec.groupby(df_1min_spec.index.hour)['low_arousal'].mean()
+            with col_g3:
+                fig3 = px.bar(x=[f"{h}:00" for h in hour_arousal.index], y=hour_arousal.values, title="平均低覚醒スコア", labels={'x': '時間帯', 'y': 'スコア'})
+                fig3.update_traces(marker_color='#8b5cf6')
+                st.plotly_chart(fig3, use_container_width=True)
+
+        st.markdown("#### 📍 曜日×時間帯 ヒートマップ")
+        
+        def plot_heatmap(df, val_col, title, colorscale, is_prob=False):
+            if df.empty or val_col not in df.columns: return None
+            df_hm = df.copy()
+            df_hm['hour'] = df_hm.index.hour
+            df_hm['dow'] = df_hm.index.dayofweek
+            pivot = df_hm.pivot_table(values=val_col, index='hour', columns='dow', aggfunc='mean')
+            
+            if is_prob:
+                pivot = pivot * 100
+                
+            valid_dows = [d for d in selected_dow_indices if d in pivot.columns]
+            valid_hours = list(range(time_range[0], time_range[1]+1))
+            
+            if not valid_dows: return None
+            
+            heatmap_data = np.full((len(valid_hours), len(valid_dows)), np.nan)
+            for i, h in enumerate(valid_hours):
+                for j, d in enumerate(valid_dows):
+                    if h in pivot.index and d in pivot.columns:
+                        heatmap_data[i, j] = pivot.loc[h, d]
+                        
+            x_labels = [dow_options[d] for d in valid_dows]
+            y_labels = [f"{h}:00" for h in valid_hours]
+            
+            fig = go.Figure(data=go.Heatmap(z=heatmap_data, x=x_labels, y=y_labels, colorscale=colorscale, hoverongaps=False))
+            fig.update_layout(title=title, yaxis_autorange='reversed', height=350, margin=dict(l=20, r=20, t=40, b=20))
+            return fig
+            
+        col_hm1, col_hm2, col_hm3 = st.columns(3)
+        with col_hm1:
+            fig_hm1 = plot_heatmap(df_feat_spec, 'is_high_focus_wave', '高集中 確率 (%)', 'Blues', is_prob=True)
+            if fig_hm1: st.plotly_chart(fig_hm1, use_container_width=True)
+        with col_hm2:
+            fig_hm2 = plot_heatmap(df_1min_spec, 'fatigue_smooth', '疲労スコア', 'Reds')
+            if fig_hm2: st.plotly_chart(fig_hm2, use_container_width=True)
+        with col_hm3:
+            fig_hm3 = plot_heatmap(df_1min_spec, 'low_arousal', '低覚醒スコア', 'Purples')
+            if fig_hm3: st.plotly_chart(fig_hm3, use_container_width=True)
