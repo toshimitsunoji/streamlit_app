@@ -59,9 +59,19 @@ def make_wave_features(df_resampled, df_sched, freq_td):
     df_feat = df_resampled.copy()
     
     # 1️⃣ 統合集中強度スコアの構築
-    score_cols = [c for c in ['CVRR_SCORE_NEW', 'RMSSD_SCORE_NEW', 'LFHF_SCORE_NEW', 'CVRR_SCORE', 'RMSSD_SCORE'] if c in df_feat.columns]
-    if score_cols:
-        df_feat['focus_intensity'] = df_feat[score_cols].mean(axis=1)
+    # CVRR_SCORE_NEW: 大きい程集中(+)
+    # RMSSD_SCORE_NEW: 大きい程疲労(-) -> 反転して集中指標に合わせる(100 - score)
+    # LFHF_SCORE_NEW: 大きい程交感神経優位(+)
+    focus_components = []
+    if 'CVRR_SCORE_NEW' in df_feat.columns:
+        focus_components.append(df_feat['CVRR_SCORE_NEW'])
+    if 'RMSSD_SCORE_NEW' in df_feat.columns:
+        focus_components.append(100 - df_feat['RMSSD_SCORE_NEW'])
+    if 'LFHF_SCORE_NEW' in df_feat.columns:
+        focus_components.append(df_feat['LFHF_SCORE_NEW'])
+        
+    if focus_components:
+        df_feat['focus_intensity'] = pd.concat(focus_components, axis=1).mean(axis=1)
     elif '集中判定' in df_feat.columns:
         df_feat['focus_intensity'] = df_feat['集中判定'] * 100 # スケール合わせ
     else:
