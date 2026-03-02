@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Deep Work 最大化・集中波解析アプリ (Wave Dynamics + Fatigue/Arousal + Task Optimization)
+Neuro Design　- 個人の深思考マネジメント -
 """
 
 import streamlit as st
@@ -22,7 +22,7 @@ import math
 import io
 
 # --- Streamlit ページ設定 ---
-st.set_page_config(page_title="Deep Work Wave Dynamics", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Neuro Design　- 個人の深思考マネジメント -", layout="wide", initial_sidebar_state="expanded")
 
 # 日本語フォントの設定
 font_path = Path(__file__).parent / "assets" / "fonts" / "NotoSansCJKjp-Regular.otf"
@@ -36,9 +36,11 @@ warnings.filterwarnings('ignore')
 
 # --- パラメータ設定 (タスク最適配置エンジン) ---
 MIN_DEEP_DURATION = 60
+MAX_BLOCK_DURATION = 120 # 追加: ブロックの最大長（最大2時間）
 GAP_TOLERANCE = 5
 FOCUS_STREAK_MIN = 5
 WEEKLY_MIN_DEEP = 2
+MAX_DAILY_BLOCKS = 4 # 追加: 1日あたりの提案ブロック数上限（詰め込みすぎ防止）
 
 # --- カスタムCSS ---
 st.markdown("""
@@ -374,6 +376,9 @@ def add_1min_focus_wave(df_1min):
     return df
 
 def extract_free_blocks(df_sched_raw, start_dt, end_dt):
+    """
+    空き時間を抽出し、長すぎる場合は最大120分（MAX_BLOCK_DURATION）に分割する
+    """
     idx = pd.date_range(start=start_dt.ceil('1T'), end=end_dt.floor('1T'), freq='1T')
     df_dummy = pd.DataFrame(index=idx)
     df_dummy = df_dummy[(df_dummy.index.hour >= 9) & (df_dummy.index.hour < 19)]
@@ -392,14 +397,31 @@ def extract_free_blocks(df_sched_raw, start_dt, end_dt):
             
     free_blocks_id = (df_dummy['has_schedule'] != df_dummy['has_schedule'].shift()).cumsum()
     blocks = []
+    
     for b_id, b_df in df_dummy[df_dummy['has_schedule'] == 0].groupby(free_blocks_id):
         for d, d_df in b_df.groupby(b_df.index.date):
-            duration = len(d_df)
-            if duration >= MIN_DEEP_DURATION:
-                blocks.append({
-                    'date': d, 'start_dt': d_df.index[0], 'end_dt': d_df.index[-1] + pd.Timedelta(minutes=1),
-                    'duration': duration, 'hour': d_df.index[0].hour
-                })
+            total_duration = len(d_df)
+            
+            # ブロック分割ロジック（最大2時間にスライス）
+            if total_duration >= MIN_DEEP_DURATION:
+                num_blocks = math.ceil(total_duration / MAX_BLOCK_DURATION)
+                # 分割後の各ブロックが最低60分を満たすように調整
+                while num_blocks > 1 and (total_duration / num_blocks) < MIN_DEEP_DURATION:
+                    num_blocks -= 1
+                
+                chunk_size = total_duration // num_blocks
+                
+                for i in range(num_blocks):
+                    start_idx = i * chunk_size
+                    end_idx = total_duration if i == num_blocks - 1 else (i + 1) * chunk_size
+                    sub_df = d_df.iloc[start_idx:end_idx]
+                    duration = len(sub_df)
+                    
+                    if duration >= MIN_DEEP_DURATION:
+                        blocks.append({
+                            'date': d, 'start_dt': sub_df.index[0], 'end_dt': sub_df.index[-1] + pd.Timedelta(minutes=1),
+                            'duration': duration, 'hour': sub_df.index[0].hour
+                        })
     return blocks
 
 def evaluate_deep_success(df_1min, block, fatigue_drift_th):
@@ -506,36 +528,58 @@ def optimize_next_week(df_sched_raw, hourly_profile, current_time):
             used_dates.add(b['date'])
             
     other_blocks = [b for b in future_blocks if b not in deep_blocks]
+    final_other_blocks = []
+    
+    # 1日にタスクを詰め込みすぎないためのカウンター
+    daily_task_count = {}
+    for b in deep_blocks:
+        daily_task_count[b['date']] = daily_task_count.get(b['date'], 0) + 1
+        
     for b in other_blocks:
+        d = b['date']
         h = b['hour']
         focus_l = hourly_profile.loc[h, 'focus_level'] if h in hourly_profile.index else '中'
         fatigue_l = hourly_profile.loc[h, 'fatigue_level'] if h in hourly_profile.index else '中'
+        suitability = hourly_profile.loc[h, 'suitability'] if h in hourly_profile.index else 0
         
-        if focus_l == '高' and fatigue_l == '低': b['type'] = '仕上げ (Execution)'
-        elif focus_l == '中' and fatigue_l == '中': b['type'] = '深思考予備'
-        else: b['type'] = '軽思考 (Light Thinking)'
+        # 1日の最大ブロック数（時間割の密度）を制御
+        if daily_task_count.get(d, 0) >= MAX_DAILY_BLOCKS:
+            continue
             
-    return deep_blocks, other_blocks
+        if focus_l == '高' and fatigue_l == '低': 
+            b['type'] = '仕上げ (Execution)'
+            final_other_blocks.append(b)
+            daily_task_count[d] = daily_task_count.get(d, 0) + 1
+        elif focus_l == '中' and fatigue_l == '中': 
+            b['type'] = '深思考予備'
+            final_other_blocks.append(b)
+            daily_task_count[d] = daily_task_count.get(d, 0) + 1
+        elif focus_l == '低' and fatigue_l == '高':
+            # 疲労が高く集中できない時間は提案をスキップし、戦略的余白（休憩）とする
+            pass 
+        else: 
+            # 軽思考だが、適性スコアが極端に低い時間（-1.0以下）は提案から除外
+            if suitability > -1.0:
+                b['type'] = '軽思考 (Light Thinking)'
+                final_other_blocks.append(b)
+                daily_task_count[d] = daily_task_count.get(d, 0) + 1
+            
+    return deep_blocks, final_other_blocks
 
 def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
-    """
-    Plotlyを用いて今後7日間のタスク最適配置スケジュール（ガントチャート風）を描画する関数
-    """
     timeline_data = []
-    base_date = datetime.date(2000, 1, 1) # X軸を時間のみで揃えるためのダミー日付
+    base_date = datetime.date(2000, 1, 1) 
     
     target_dates = [(current_time.date() + datetime.timedelta(days=i)) for i in range(7)]
     
     for d in target_dates:
-        if d.weekday() >= 5: continue # 平日のみ表示
+        if d.weekday() >= 5: continue 
         
         date_str = f"{d.strftime('%m/%d')} ({['月','火','水','木','金','土','日'][d.weekday()]})"
         
-        # 既存の予定を追加
         if df_sched_raw is not None and not df_sched_raw.empty:
             day_sched = df_sched_raw[df_sched_raw['start_dt'].dt.date == d]
             for _, row in day_sched.iterrows():
-                # 9:00〜19:00の範囲内に表示をトリミング
                 start_h = max(row['start_dt'], datetime.datetime.combine(d, datetime.time(9, 0)))
                 end_h = min(row['end_dt'], datetime.datetime.combine(d, datetime.time(19, 0)))
                 if start_h < end_h:
@@ -546,7 +590,6 @@ def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
                         'Type': '既存の予定', 'Task': row['件名'] if '件名' in row else '予定'
                     })
                     
-        # 深思考枠を追加
         for b in deep_blocks:
             if b['start_dt'].date() == d:
                 dummy_start = datetime.datetime.combine(base_date, b['start_dt'].time())
@@ -556,7 +599,6 @@ def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
                     'Type': '👑 深思考', 'Task': '深思考枠'
                 })
                 
-        # その他の推奨枠を追加
         for b in other_blocks:
             if b['start_dt'].date() == d:
                 dummy_start = datetime.datetime.combine(base_date, b['start_dt'].time())
@@ -570,7 +612,6 @@ def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
     df_tl = pd.DataFrame(timeline_data)
     if df_tl.empty: return None
         
-    # 日付の降順にソート（グラフ上で上から下へ新しい日付を並べるため）
     df_tl['DateObj'] = pd.to_datetime(df_tl['DateStr'].str.extract(r'(\d{2}/\d{2})')[0], format='%m/%d')
     df_tl = df_tl.sort_values('DateObj', ascending=False)
 
@@ -586,7 +627,6 @@ def plot_weekly_schedule(df_sched_raw, deep_blocks, other_blocks, current_time):
         hover_data=["Task"]
     )
     
-    # 横軸のフォーマットを時間だけに設定
     fig.update_layout(
         xaxis=dict(
             tickformat="%H:%M",
