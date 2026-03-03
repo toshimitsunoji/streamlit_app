@@ -813,6 +813,10 @@ if file_ts is not None:
         st.markdown("#### 🌊 今週の集中波形 (モメンタルグラフ)")
         st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン」です。波の周期性が確認できます。")
         
+        # ▼ ここに week_dates の定義を追加・復活させました
+        week_dates = df_this_week['date'].unique()
+        week_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
+        
         if len(week_dates) > 0:
             for i in range(0, len(week_dates), 2):
                 cols = st.columns(2)
