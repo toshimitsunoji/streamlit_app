@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 NeuroDesign　- 個人の深思考マネジメント -
-（深思考成功確率予測エンジン ＋ コンディション分析フル統合版）
+（相対評価・思考予報エンジン搭載版）
 """
 
 import streamlit as st
@@ -35,6 +35,19 @@ if font_path.exists():
 mpl.rcParams["axes.unicode_minus"] = False
 warnings.filterwarnings('ignore')
 
+# ==========================================
+# 🛑 パラメータ設定 (深思考保全エンジン)
+# ==========================================
+MIN_DEEP_DURATION = 60          # 深思考とみなす最低ブロック長(分)
+GAP_TOLERANCE = 5               # 許容する中断時間(分)
+FOCUS_STREAK_MIN = 5            # 高集中が連続すべき最低時間(分)
+LOW_AROUSAL_HIGH = 66           # 低覚醒「高い(P66)」のパーセンタイル閾値
+LOW_AROUSAL_VERY_HIGH = 90      # 低覚醒「非常に高い(P90)」のパーセンタイル閾値
+LOW_AROUSAL_BLOCK_MINUTES = 30  # 重度低覚醒時の深思考禁止時間(分)
+LOW_AROUSAL_SHIFT_MINUTES = 10  # 中度低覚醒時の開始時間シフト(分)
+MAX_DAILY_DEEP_BLOCKS = 1       # 1日に提示する深思考枠の最大数
+DISPLAY_DEEP_DURATION = 90      # 画面に提示する深思考枠の上限時間(分)
+
 # --- カスタムCSS ---
 st.markdown("""
 <style>
@@ -43,11 +56,7 @@ st.markdown("""
     .kpi-value-main { font-size: 3.5rem; color: #1e293b; font-weight: 800; line-height: 1.1; margin-bottom: 5px; }
     .kpi-value-wave { font-size: 2.5rem; color: #2563eb; font-weight: 800; line-height: 1.2; margin-bottom: 5px; }
     .kpi-unit { font-size: 1.2rem; color: #64748b; font-weight: 500; }
-    .kpi-sub { font-size: 1.1rem; color: #10b981; font-weight: bold; margin-top: 10px; }
-    .kpi-sub.warning { color: #f59e0b; }
-    .kpi-sub.alert { color: #ef4444; }
     .chance-box { background-color: #f0fdf4; border-left: 6px solid #10b981; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-    .chance-time { font-size: 1.8rem; color: #047857; font-weight: 800; }
     .forecast-box { background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; text-align: center; margin-bottom: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }
 </style>
 """, unsafe_allow_html=True)
@@ -71,7 +80,6 @@ def compute_fatigue_features(df_1min, steps_col=None):
         
     df['fatigue_smooth'] = df['fatigue_score'].ewm(span=10, min_periods=1).mean()
     
-    # ドリフト・レベル判定 (UI表示用)
     w60 = np.arange(60) - 29.5
     var_x = np.sum(w60**2)
     w60 = w60 / var_x if var_x > 0 else w60
@@ -212,113 +220,213 @@ def summarize_daily_condition(df_1min):
     return df_daily[[c for c in cols if c in df_daily.columns]]
 
 # ==========================================
-# 🎯 B. 深思考成功確率予測エンジン (1時間単位)
+# 🎯 B. 思考予報エンジン (相対適性スコアリング)
 # ==========================================
-def compute_base_success_prob(df_1min):
+def compute_hourly_base_profile(df_1min):
+    """
+    過去N日間のデータから時間帯別のベース適性 (Base_h) を作成
+    """
     df = df_1min.copy()
-    df['date_hour'] = df.index.floor('H')
+    df['hour'] = df.index.hour
     
     focus_q50 = df['focus_intensity'].median() if not df['focus_intensity'].isna().all() else 50
-    fatigue_median = df['fatigue_smooth'].median() if not df['fatigue_smooth'].isna().all() else 50
     fatigue_th = df['fatigue_smooth'].quantile(0.75) if not df['fatigue_smooth'].isna().all() else 50
-    la_threshold = df['low_arousal'].quantile(0.75) if not df['low_arousal'].isna().all() else 0
+    la_th = df['low_arousal'].quantile(0.75) if not df['low_arousal'].isna().all() else 0
     
     focus_series = df['is_high_focus_wave']
     focus_streak = focus_series.groupby((focus_series != focus_series.shift()).cumsum()).transform('size') * focus_series
     df['has_5m_focus'] = (focus_streak >= 5).astype(int)
     
     records = []
-    for name, group in df.groupby('date_hour'):
-        hour = name.hour
-        if not (9 <= hour <= 18): continue
-        
-        max_focus = group['focus_intensity'].max()
-        is_trial = 1 if max_focus >= focus_q50 else 0
-        
-        if is_trial:
-            cond_A = group['has_5m_focus'].max() > 0
-            cond_B = group['fatigue_smooth'].mean() <= fatigue_th
-            cond_C = group['low_arousal'].mean() <= la_threshold
-            is_success = 1 if (cond_A and cond_B and cond_C) else 0
-        else:
-            is_success = 0
-            
-        records.append({'hour': hour, 'is_trial': is_trial, 'is_success': is_success})
-        
-    df_records = pd.DataFrame(records)
-    
-    if df_records.empty or df_records['is_trial'].sum() == 0:
-        base_prob = pd.Series(0.5, index=np.arange(9, 19))
-    else:
-        hourly_stats = df_records.groupby('hour').agg({'is_trial': 'sum', 'is_success': 'sum'})
-        base_prob = (hourly_stats['is_success'] + 1) / (hourly_stats['is_trial'] + 2)
-        global_mean = (df_records['is_success'].sum() + 1) / (df_records['is_trial'].sum() + 2)
-        base_prob = base_prob.reindex(np.arange(9, 19)).fillna(global_mean)
-        
-    smooth_prob = base_prob.rolling(window=3, min_periods=1, center=True).mean()
-    return smooth_prob, fatigue_median
-
-def forecast_hourly_success_prob(df_1min, base_prob, fatigue_median, target_dt):
-    past_df = df_1min[df_1min.index <= target_dt]
-    recent_df = past_df.last('60T') if not past_df.empty else pd.DataFrame()
-    
-    fatigue_now = recent_df['fatigue_smooth'].mean() if not recent_df.empty else fatigue_median
-    la_now = recent_df['low_arousal'].mean() if not recent_df.empty else 0
-    
-    alpha = 0.25 
-    beta = 0.25  
-    
-    fatigue_dev = (fatigue_now - fatigue_median) / 50.0 
-    fatigue_dev = max(0.0, min(1.0, fatigue_dev)) 
-    
-    la_max = df_1min['low_arousal'].max()
-    if pd.isna(la_max) or la_max == 0: la_max = 1.0
-    la_risk = max(0.0, min(1.0, la_now / la_max))
-    
-    forecasts = {}
     for h in range(9, 19):
-        bp = base_prob.get(h, 0.5)
-        if pd.isna(bp): bp = 0.5 
-        adj_prob = bp * (1 - alpha * fatigue_dev) * (1 - beta * la_risk)
-        forecasts[h] = max(0.0, min(1.0, adj_prob))
+        group = df[df['hour'] == h]
+        if group.empty:
+            records.append({'hour': h, 'success_rate': 0.5, 'mean_fatigue': 50, 'mean_la': 0})
+            continue
+            
+        trials = 0
+        successes = 0
+        for d, d_group in group.groupby(group.index.date):
+            if d_group['focus_intensity'].max() >= focus_q50:
+                trials += 1
+                cond_A = d_group['has_5m_focus'].max() > 0
+                cond_B = d_group['fatigue_smooth'].mean() <= fatigue_th
+                cond_C = d_group['low_arousal'].mean() <= la_th
+                if cond_A and cond_B and cond_C:
+                    successes += 1
+                    
+        sr = (successes + 1) / (trials + 2) # Laplace smoothing
+        mf = group['fatigue_smooth'].mean()
+        mla = group['low_arousal'].mean()
+        records.append({'hour': h, 'success_rate': sr, 'mean_fatigue': mf, 'mean_la': mla})
         
-    return forecasts
-
-def get_today_best_hour(forecasts, df_sched_raw, target_dt):
-    best_hour = None
-    best_prob = -1.0
-    today_date = target_dt.date()
+    prof = pd.DataFrame(records).set_index('hour')
     
-    for h, prob in forecasts.items():
-        h_start = pd.Timestamp(datetime.datetime.combine(today_date, datetime.time(h, 0)))
-        h_end = h_start + pd.Timedelta(hours=1)
+    def z_score(s):
+        if s.std() == 0: return s - s.mean()
+        return (s - s.mean()) / s.std()
         
-        if h_end <= target_dt:
-            continue 
-            
-        has_conflict = False
-        if df_sched_raw is not None and not df_sched_raw.empty:
-            conflicts = df_sched_raw[(df_sched_raw['end_dt'] > h_start) & (df_sched_raw['start_dt'] < h_end)]
-            if not conflicts.empty:
-                has_conflict = True
-                
-        if not has_conflict and prob > best_prob:
-            best_prob = prob
-            best_hour = h
-            
-    if best_hour is None:
-        future_fs = {k: v for k, v in forecasts.items() if pd.Timestamp(datetime.datetime.combine(today_date, datetime.time(k, 0))) + pd.Timedelta(hours=1) > target_dt}
-        if future_fs:
-            best_hour = max(future_fs, key=future_fs.get)
-            best_prob = future_fs[best_hour]
-            
-    return best_hour, best_prob
+    prof['z_sr'] = z_score(prof['success_rate'])
+    prof['z_fat'] = z_score(prof['mean_fatigue'])
+    prof['z_la'] = z_score(prof['mean_la'])
+    
+    # Base_h = z(success_rate_h) - z(mean_fatigue_h) - z(mean_low_arousal_h)
+    prof['base_h'] = prof['z_sr'] - prof['z_fat'] - prof['z_la']
+    return prof
 
-def get_prob_color(prob):
-    p = prob * 100
-    if p >= 60: return "#10b981" 
-    elif p >= 40: return "#f59e0b" 
-    else: return "#ef4444" 
+def compute_today_relative_forecast(df_1min, base_profile, t_now):
+    """
+    当日データで補正し、1日の中での相対的な「思考予報 (◎/○/△/×)」を算出
+    """
+    df_today = df_1min[df_1min.index.date == t_now.date()]
+    recent_10m = df_1min[df_1min.index <= t_now].last('10T')
+    
+    fat_now = recent_10m['fatigue_smooth'].mean() if not recent_10m.empty else df_1min['fatigue_smooth'].median()
+    la_now = recent_10m['low_arousal'].mean() if not recent_10m.empty else 0
+    
+    hist_fat_mean = df_1min['fatigue_smooth'].mean()
+    hist_fat_std = df_1min['fatigue_smooth'].std() or 1.0
+    hist_la_mean = df_1min['low_arousal'].mean()
+    hist_la_std = df_1min['low_arousal'].std() or 1.0
+    
+    def z_fat(x): return (x - hist_fat_mean) / hist_fat_std
+    def z_la(x): return (x - hist_la_mean) / hist_la_std
+    
+    scores = {}
+    for h in range(9, 19):
+        base_h = base_profile.loc[h, 'base_h'] if h in base_profile.index else 0
+        
+        # 過去の時間は今日の実績を、未来の時間は現在状態を使用
+        if h <= t_now.hour and not df_today[df_today.index.hour == h].empty:
+            f_val = df_today[df_today.index.hour == h]['fatigue_smooth'].mean()
+            la_val = df_today[df_today.index.hour == h]['low_arousal'].mean()
+        else:
+            f_val = fat_now
+            la_val = la_now
+            
+        # Adj_h = - z(fatigue_today_h) - z(low_arousal_today_h)
+        adj_h = - z_fat(f_val) - z_la(la_val)
+        
+        # Score_h = Base_h + 0.5 * Adj_h
+        scores[h] = base_h + 0.5 * adj_h
+        
+    s_series = pd.Series(scores)
+    
+    # 相対評価 (上位20%, 20-50%, 50-80%, 下位20%) に応じてラベル付け (10時間なので 2:3:3:2)
+    ranks = s_series.rank(method='first', ascending=False)
+    tiers = {}
+    for h, r in ranks.items():
+        if r <= 2: tiers[h] = '◎'
+        elif r <= 5: tiers[h] = '○'
+        elif r <= 8: tiers[h] = '△'
+        else: tiers[h] = '×'
+        
+    return tiers, s_series
+
+def extract_free_blocks(df_sched_raw, start_dt, end_dt):
+    idx = pd.date_range(start=start_dt.ceil('1T'), end=end_dt.floor('1T'), freq='1T')
+    df_dummy = pd.DataFrame(index=idx)
+    df_dummy = df_dummy[(df_dummy.index.hour >= 9) & (df_dummy.index.hour < 19)]
+    df_dummy = df_dummy[df_dummy.index.dayofweek < 5]
+    
+    df_dummy['has_schedule'] = 0
+    if df_sched_raw is not None and not df_sched_raw.empty:
+        for _, row in df_sched_raw.iterrows():
+            mask = (df_dummy.index >= row['start_dt']) & (df_dummy.index < row['end_dt'])
+            df_dummy.loc[mask, 'has_schedule'] = 1
+            
+    sched_blocks = (df_dummy['has_schedule'] != df_dummy['has_schedule'].shift()).cumsum()
+    for b_id, b_df in df_dummy[df_dummy['has_schedule'] == 1].groupby(sched_blocks):
+        if len(b_df) <= GAP_TOLERANCE:
+            df_dummy.loc[b_df.index, 'has_schedule'] = 0
+            
+    free_blocks_id = (df_dummy['has_schedule'] != df_dummy['has_schedule'].shift()).cumsum()
+    blocks = []
+    
+    for b_id, b_df in df_dummy[df_dummy['has_schedule'] == 0].groupby(free_blocks_id):
+        for d, d_df in b_df.groupby(b_df.index.date):
+            duration = len(d_df)
+            if duration >= MIN_DEEP_DURATION:
+                blocks.append({
+                    'date': d, 'start_dt': d_df.index[0], 'end_dt': d_df.index[-1] + pd.Timedelta(minutes=1),
+                    'duration': duration, 'hour': d_df.index[0].hour
+                })
+    return blocks
+
+def recommend_today_deep_block(df_1min, df_sched_raw, today_scores, t_now):
+    """
+    リアルタイム状態(t_now)と相対スコア(Score_h)を反映して、深思考枠を1つだけ提案
+    """
+    today_end = t_now.replace(hour=19, minute=0, second=0, microsecond=0)
+    if t_now >= today_end: return None, []
+        
+    past_arousal = df_1min['low_arousal'].dropna()
+    p66 = np.percentile(past_arousal, LOW_AROUSAL_HIGH) if not past_arousal.empty else 0
+    p90 = np.percentile(past_arousal, LOW_AROUSAL_VERY_HIGH) if not past_arousal.empty else 0
+    
+    recent_10m = df_1min[df_1min.index <= t_now].last('10T')
+    la_now = recent_10m['low_arousal'].mean() if not recent_10m.empty else 0
+    
+    blocks = extract_free_blocks(df_sched_raw, t_now, today_end)
+    
+    best_block = None
+    best_score = -float('inf')
+    best_reasons = []
+    
+    for b in blocks:
+        start_dt = b['start_dt']
+        end_dt = b['end_dt']
+        reasons = []
+        
+        # リアルタイム補正ルール (低覚醒に基づく除外・シフト)
+        if la_now >= p90:
+            # 非常に高い: t_nowから30分は開始不可。
+            shift_start = max(start_dt, t_now + pd.Timedelta(minutes=LOW_AROUSAL_BLOCK_MINUTES))
+            if (end_dt - shift_start).total_seconds() / 60 >= MIN_DEEP_DURATION:
+                start_dt = shift_start
+            else:
+                continue # 除外
+        elif la_now >= p66:
+            # 高い: 開始を10分後ろにシフトし、準備時間を確保
+            shift_start = max(start_dt, t_now + pd.Timedelta(minutes=LOW_AROUSAL_SHIFT_MINUTES))
+            if (end_dt - shift_start).total_seconds() / 60 >= MIN_DEEP_DURATION:
+                start_dt = shift_start
+                reasons.append("開始前に10分の歩行/ストレッチを推奨")
+            else:
+                continue
+                
+        h = start_dt.hour
+        base_s = today_scores.get(h, 0)
+        
+        # 前後会議のペナルティ判定
+        penalty = 0
+        has_prev_meeting = False
+        if df_sched_raw is not None and not df_sched_raw.empty:
+            prev_s = df_sched_raw[(df_sched_raw['end_dt'] > start_dt - pd.Timedelta(minutes=30)) & (df_sched_raw['end_dt'] <= start_dt)]
+            if not prev_s.empty:
+                penalty -= 0.5
+                has_prev_meeting = True
+                
+        score = base_s + penalty
+        
+        if score > best_score:
+            best_score = score
+            base_reasons = []
+            base_reasons.append("本日の相対的な適性スコアが高い時間帯です。")
+            if not has_prev_meeting:
+                base_reasons.append("直前に会議がなく、集中に入りやすい環境です。")
+                
+            best_reasons = base_reasons + reasons 
+            b['adj_start_dt'] = start_dt
+            b['adj_end_dt'] = end_dt
+            best_block = b
+
+    if best_block:
+        disp_dur = min((best_block['adj_end_dt'] - best_block['adj_start_dt']).total_seconds() / 60, DISPLAY_DEEP_DURATION)
+        best_block['display_end_dt'] = best_block['adj_start_dt'] + pd.Timedelta(minutes=disp_dur)
+        return best_block, best_reasons
+    
+    return None, []
 
 # ==========================================
 # 🌊 C. 波解析・コンディション分析エンジン
@@ -487,7 +595,7 @@ ahead_steps = max(1, int(pd.Timedelta(minutes=PREDICT_AHEAD_MINS) / freq_td))
 
 # === メイン処理パイプライン ===
 if file_ts is not None:
-    with st.spinner("深思考成功確率とコンディションを計算中..."):
+    with st.spinner("深思考相対適性とコンディションを計算中..."):
         # 1. データロード
         df_ts_raw = pd.read_csv(io.BytesIO(file_ts.getvalue()), skiprows=2)
         df_ts_raw['timestamp_clean'] = df_ts_raw['timestamp'].astype(str).str.split(' GMT').str[0]
@@ -520,17 +628,10 @@ if file_ts is not None:
         else:
             t_now = df_1min.index[-1]
             
-        # 3. 確率予測エンジン (1時間単位の絶対確率)
-        base_prob, fatigue_median = compute_base_success_prob(df_1min)
-        today_forecasts = forecast_hourly_success_prob(df_1min, base_prob, fatigue_median, t_now)
-        best_hour, best_prob = get_today_best_hour(today_forecasts, df_sched_raw, t_now)
-        
-        yesterday_dt = t_now - pd.Timedelta(days=1)
-        yesterday_forecasts = forecast_hourly_success_prob(df_1min, base_prob, fatigue_median, yesterday_dt)
-        today_max = max(today_forecasts.values()) if today_forecasts else 0
-        today_avg = sum(today_forecasts.values()) / len(today_forecasts) if today_forecasts else 0
-        yesterday_avg = sum(yesterday_forecasts.values()) / len(yesterday_forecasts) if yesterday_forecasts else 0
-        diff_avg = today_avg - yesterday_avg
+        # 3. 相対評価・思考予報エンジン
+        base_profile = compute_hourly_base_profile(df_1min)
+        today_tiers, today_scores_s = compute_today_relative_forecast(df_1min, base_profile, t_now)
+        best_deep_block, deep_reasons = recommend_today_deep_block(df_1min, df_sched_raw, today_scores_s, t_now)
 
         # 4. 波解析・コンディションエンジン (リアルタイム＆振り返り用)
         df_resampled = df_ts_raw[num_cols].resample(RESAMPLE_FREQ).mean()
@@ -589,7 +690,7 @@ if file_ts is not None:
     # ==========================================
     col_h1, col_h2 = st.columns([3, 1])
     with col_h1:
-        st.markdown(f"<p style='color: gray; margin-top: 15px;'>最終予測時刻: {t_now.strftime('%Y/%m/%d %H:%M')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: gray; margin-top: 15px;'>最終予測時刻 (t_now): {t_now.strftime('%Y/%m/%d %H:%M')}</p>", unsafe_allow_html=True)
     with col_h2:
         if st.button("🔄 最新状態で確率を再計算", use_container_width=True):
             st.rerun()
@@ -598,25 +699,20 @@ if file_ts is not None:
 
     # --- TAB 1: Today ---
     with tab_today:
-        st.markdown("### 📊 本日のポテンシャル")
-        col_k1, col_k2, col_k3 = st.columns(3)
-        with col_k1:
-            st.metric("今日の最高成功確率", f"{today_max*100:.0f}%")
-        with col_k2:
-            st.metric("今日の平均成功確率", f"{today_avg*100:.0f}%", f"{diff_avg*100:+.0f}% (昨日比)")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        if best_hour is not None:
-            color = get_prob_color(best_prob)
+        st.markdown("### 👑 今日の深思考 (The Only Block)")
+        
+        if best_deep_block:
+            start_str = best_deep_block['adj_start_dt'].strftime('%H:%M')
+            end_str = best_deep_block['display_end_dt'].strftime('%H:%M')
+            reasons_html = '<br>'.join(['・' + r for r in deep_reasons])
+            
             st.markdown(f"""
-            <div style="background-color: #f8fafc; border-left: 6px solid {color}; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
-                <div style="font-size: 1.1rem; color: #64748b; font-weight: bold; margin-bottom: 5px;">👑 今日の勝負時間 (Deep Work)</div>
-                <div style="font-size: 3rem; font-weight: 800; color: #1e293b;">
-                    🔥 {best_hour}:00 – {best_hour+1}:00 
-                    <span style="font-size: 2.2rem; color: {color}; margin-left: 20px;">{best_prob*100:.0f}%</span>
+            <div style="background-color: #f8fafc; border-left: 6px solid #8b5cf6; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+                <div style="font-size: 2.5rem; font-weight: 800; color: #1e293b; margin-bottom: 10px;">
+                    🔥 {start_str} – {end_str}
                 </div>
-                <div style="font-size: 1rem; color: #475569; margin-top: 10px;">
-                    リアルタイムの疲労・覚醒状況と予定の空きを考慮し、本日最も成功確率の高い時間を算出しました。
+                <div style="font-size: 1.1rem; color: #475569; line-height: 1.6;">
+                    {reasons_html}
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -632,24 +728,22 @@ if file_ts is not None:
             </div>
             """, unsafe_allow_html=True)
 
-        st.markdown("### 🌤 思考の天気予報 (時間帯別・成功確率)")
-        st.write("各時間帯に深思考を実施した場合の予測成功確率です。絶対値のみを示しています。")
+        st.markdown("### 🌤 今日の思考予報 (時間帯別 相対適性)")
+        st.write("今日1日の中での「深思考への適正」を相対評価（◎・○・△・×）で表しています。")
         
-        # 10時間分(9:00〜18:00)を1段で表示するために10列のコンテナを作成
         cols = st.columns(10)
         for i, h in enumerate(range(9, 19)):
-            p = today_forecasts.get(h, 0)
-            color = get_prob_color(p)
+            tier = today_tiers.get(h, '○')
+            color = "#10b981" if tier == '◎' else "#3b82f6" if tier == '○' else "#f59e0b" if tier == '△' else "#ef4444"
             with cols[i]:
-                # 10列に収まるようにpaddingとfont-sizeを少しコンパクトに調整
                 st.markdown(f"""
                 <div class="forecast-box" style="border-top: 4px solid {color}; padding: 10px 2px;">
                     <div style="font-size: 1rem; font-weight: bold; color: #475569;">{h}:00</div>
-                    <div style="font-size: 1.4rem; font-weight: 900; color: {color}; margin-top: 5px;">{p*100:.0f}<span style="font-size:0.8rem;">%</span></div>
+                    <div style="font-size: 2rem; font-weight: 900; color: {color}; margin-top: 5px;">{tier}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
-        # --- リアルタイム コンディション (復活) ---
+        # --- リアルタイム コンディション ---
         st.markdown("---")
         st.markdown("### 🔋 リアルタイム コンディション (疲労・覚醒)")
         col_c1, col_c2, col_c3 = st.columns([1, 1, 1.5])
@@ -703,32 +797,17 @@ if file_ts is not None:
             </div>
             """, unsafe_allow_html=True)
 
-        col_s1, col_s2 = st.columns([1, 1.5])
-        with col_s1:
-            st.markdown(f"""
-            <div style="display: flex; gap: 10px;">
-                <div class="kpi-card" style="flex: 1; padding: 15px;">
-                    <div class="kpi-title" style="font-size:0.85rem;">空白時間の集中率</div>
-                    <div style="font-size:1.8rem; font-weight:bold; color:#334155;">{metrics.get('today_dw_rate', 0):.1f} <span style="font-size:1rem;">%</span></div>
-                </div>
-                <div class="kpi-card" style="flex: 1; padding: 15px;">
-                    <div class="kpi-title" style="font-size:0.85rem;">分断ロス(波の頓挫)</div>
-                    <div style="font-size:1.8rem; font-weight:bold; color:#334155;">{int(metrics.get('today_dw_loss', 0))} <span style="font-size:1rem;">分</span></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_s2:
-            st.markdown(f"""
-            <div class="chance-box" style="margin-bottom: 0;">
-                <div class="kpi-title" style="color: #047857;">🎯 次のDeep Workチャンス枠</div>
-                <div class="chance-time">{next_chance_text}</div>
-                <div style="font-size: 0.95rem; color: #065f46; margin-top: 8px;">この時間を死守し、波に乗って重要タスクを消化してください。</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # --- TAB 2: Weekly Report (復活) ---
+    # --- TAB 2: Weekly Report ---
     with tab_weekly:
         st.markdown("## 今週のパフォーマンスとコンディション振り返り")
+        
+        st.markdown("#### ⏳ 時間帯別ベース適性 (過去の傾向)")
+        base_df = base_profile.reset_index()
+        fig_base = px.bar(base_df, x=[f"{h}:00" for h in base_df['hour']], y='base_h', 
+                          labels={'x': '時間帯', 'y': '基本適性スコア (Z-Score)'},
+                          title="あなたの純粋な時間帯別パフォーマンス (疲労・覚醒要因調整後)")
+        fig_base.update_traces(marker_color='#8b5cf6')
+        st.plotly_chart(fig_base, use_container_width=True)
         
         df_this_week = df_feat[(df_feat['date'] > (t_now.date() - pd.Timedelta(days=7))) & (df_feat['date'] <= t_now.date())]
         df_last_week = df_feat[(df_feat['date'] > (t_now.date() - pd.Timedelta(days=14))) & (df_feat['date'] <= (t_now.date() - pd.Timedelta(days=7)))]
@@ -813,7 +892,6 @@ if file_ts is not None:
         st.markdown("#### 🌊 今週の集中波形 (モメンタルグラフ)")
         st.caption("※ 青い線が平滑化された集中の「波」を表し、赤い点がAIが検出した「波のピーク」です。グレーの点線より上の青い面が「高集中ゾーン」です。波の周期性が確認できます。")
         
-        # ▼ ここに week_dates の定義を追加・復活させました
         week_dates = df_this_week['date'].unique()
         week_dates = [d for d in week_dates if d.weekday() in selected_dow_indices]
         
@@ -850,7 +928,7 @@ if file_ts is not None:
                                 st.markdown(f"**{t_date.strftime('%m/%d')} ({['月','火','水','木','金','土','日'][t_date.weekday()]})**")
                                 st.info("指定された時間帯のデータがありません。")
 
-    # --- TAB 3: My Spec (復活) ---
+    # --- TAB 3: My Spec ---
     with tab_spec:
         st.markdown("## 👤 あなたの「集中ダイナミクス」攻略法")
         st.write("過去の全データを波形解析し、あなた固有の集中リズムを抽出しました。")
