@@ -263,8 +263,9 @@ def compute_hourly_base_profile(df_1min):
     prof = pd.DataFrame(records).set_index('hour')
     
     def z_score(s):
-        if s.std() == 0: return s - s.mean()
-        return (s - s.mean()) / s.std()
+        if s.std() == 0: return pd.Series(0, index=s.index)
+        # 極端な外れ値でスコアが壊れるのを防ぐため、-3〜+3の範囲にクリッピング
+        return ((s - s.mean()) / s.std()).clip(-3, 3)
         
     prof['z_sr'] = z_score(prof['success_rate'])
     prof['z_fat'] = z_score(prof['mean_fatigue'])
@@ -289,20 +290,28 @@ def compute_today_relative_forecast(df_1min, base_profile, t_now):
     hist_la_mean = df_1min['low_arousal'].mean()
     hist_la_std = df_1min['low_arousal'].std() or 1.0
     
-    def z_fat(x): return (x - hist_fat_mean) / hist_fat_std
-    def z_la(x): return (x - hist_la_mean) / hist_la_std
+    # 今の時間のベースプロファイル（未来のトレンド予測の基準点として使用）
+    base_fat_now = base_profile.loc[t_now.hour, 'mean_fatigue'] if t_now.hour in base_profile.index else hist_fat_mean
+    base_la_now = base_profile.loc[t_now.hour, 'mean_la'] if t_now.hour in base_profile.index else hist_la_mean
+    
+    def z_fat(x): return max(-3, min(3, (x - hist_fat_mean) / hist_fat_std))
+    def z_la(x): return max(-3, min(3, (x - hist_la_mean) / hist_la_std))
     
     scores = {}
     for h in range(9, 19):
         base_h = base_profile.loc[h, 'base_h'] if h in base_profile.index else 0
         
-        # 過去の時間は今日の実績を、未来の時間は現在状態を使用
         if h <= t_now.hour and not df_today[df_today.index.hour == h].empty:
+            # 過去〜現在の時間は今日の実績をそのまま使用
             f_val = df_today[df_today.index.hour == h]['fatigue_smooth'].mean()
             la_val = df_today[df_today.index.hour == h]['low_arousal'].mean()
         else:
-            f_val = fat_now
-            la_val = la_now
+            # 未来の時間は「現在の値 ＋ その時間の過去の平均変動幅」で予測（夕方の過大評価を防止）
+            mean_fat_h = base_profile.loc[h, 'mean_fatigue'] if h in base_profile.index else hist_fat_mean
+            mean_la_h = base_profile.loc[h, 'mean_la'] if h in base_profile.index else hist_la_mean
+            
+            f_val = max(0, fat_now + (mean_fat_h - base_fat_now))
+            la_val = max(0, la_now + (mean_la_h - base_la_now))
             
         # Adj_h = - z(fatigue_today_h) - z(low_arousal_today_h)
         adj_h = - z_fat(f_val) - z_la(la_val)
